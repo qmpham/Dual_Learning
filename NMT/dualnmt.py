@@ -41,6 +41,12 @@ class dualnmt():
         self.model_options = None
         self.worddicts = None
         self.worddicts_r = None
+        self.trng = RandomStreams(1234)
+        self.f_log_probs = None
+        self.f_init = None
+        self.f_next = None
+        self.use_noise = theano.shared(numpy.float32(0.))
+        
         
     def get_options(self,options):
         self.model_options = options
@@ -73,6 +79,7 @@ class dualnmt():
             assert (n_words_src == n_words), "When tying encoder and decoder embeddings, source and target vocabulary size must the same"
         if self.worddicts[0] != self.worddicts[1]:
             warn("Encoder-decoder embedding tying is enabled with different source and target dictionaries. This is usually a configuration error")
+
     def init_params(self):
         options = self.model_options
         params = OrderedDict()
@@ -220,8 +227,8 @@ class dualnmt():
         options = self.model_options
         opt_ret = dict()
     
-        trng = RandomStreams(1234)
-        use_noise = theano.shared(numpy.float32(0.))
+        trng = self.trng        
+        use_noise = self.use_noise
     
         x_mask = tensor.matrix('x_mask', dtype='float32')
         x_mask.tag.test_value = numpy.ones(shape=(5, 10)).astype('float32')
@@ -330,15 +337,346 @@ class dualnmt():
         cost = -tensor.log(probs.flatten()[y_flat_idx])
         cost = cost.reshape([y.shape[0], y.shape[1]])
         cost = (cost * y_mask).sum(0)
-        self.tparams['']
         self.cost = cost
         self.x = x
         self.x_mask = x_mask
-        self.y = 
-        #print "Print out in build_model()"
-        #print opt_ret
+        self.y = y
+        self.y_mask = y_mask
+        inps = [x, x_mask, y, y_mask]
+        self.f_log_probs = theano.function(inps,cost)
+        
         return trng, use_noise, x, x_mask, y, y_mask, opt_ret, cost
     
+    def build_sampler(self, return_alignment=False):
+        tparams = self.tparams
+        options = self.model_options
+        trng = self.trng
+        use_noise = self.use_noise
+        
+        if options['use_dropout'] and options['model_version'] < 0.1:
+            retain_probability_emb = 1-options['dropout_embedding']
+            retain_probability_hidden = 1-options['dropout_hidden']
+            retain_probability_source = 1-options['dropout_source']
+            retain_probability_target = 1-options['dropout_target']
+            rec_dropout_d = theano.shared(numpy.array([retain_probability_hidden]*5, dtype='float32'))
+            emb_dropout_d = theano.shared(numpy.array([retain_probability_emb]*2, dtype='float32'))
+            ctx_dropout_d = theano.shared(numpy.array([retain_probability_hidden]*4, dtype='float32'))
+            target_dropout = theano.shared(numpy.float32(retain_probability_target))
+        else:
+            rec_dropout_d = theano.shared(numpy.array([1.]*5, dtype='float32'))
+            emb_dropout_d = theano.shared(numpy.array([1.]*2, dtype='float32'))
+            ctx_dropout_d = theano.shared(numpy.array([1.]*4, dtype='float32'))
+    
+        x, ctx = self.build_encoder(tparams, options, trng, use_noise, x_mask=None, sampling=True)
+        n_samples = x.shape[2]
+    
+        # get the input for decoder rnn initializer mlp
+        ctx_mean = ctx.mean(0)
+        # ctx_mean = concatenate([proj[0][-1],projr[0][-1]], axis=proj[0].ndim-2)
+    
+        if options['use_dropout'] and options['model_version'] < 0.1:
+            ctx_mean *= retain_probability_hidden
+    
+        init_state = layers.get_layer_constr('ff')(tparams, ctx_mean, options,
+                                        prefix='ff_state', activ='tanh')
+    
+        print >>sys.stderr, 'Building f_init...',
+        outs = [init_state, ctx]
+        f_init = theano.function([x], outs, name='f_init', profile=profile)
+        print >>sys.stderr, 'Done'
+    
+        # x: 1 x 1
+        y = tensor.vector('y_sampler', dtype='int64')
+        init_state = tensor.matrix('init_state', dtype='float32')
+    
+        # if it's the first word, emb should be all zero and it is indicated by -1
+        decoder_embedding_suffix = '' if options['tie_encoder_decoder_embeddings'] else '_dec'
+        emb = layers.get_layer_constr('embedding')(tparams, y, suffix=decoder_embedding_suffix)
+        if options['use_dropout'] and options['model_version'] < 0.1:
+            emb = emb * target_dropout
+        emb = tensor.switch(y[:, None] < 0,
+                            tensor.zeros((1, options['dim_word'])),
+                            emb)
+    
+    
+        # apply one step of conditional gru with attention
+        proj = layers.get_layer_constr(options['decoder'])(tparams, emb, options,
+                                                prefix='decoder',
+                                                mask=None, context=ctx,
+                                                one_step=True,
+                                                init_state=init_state,
+                                                emb_dropout=emb_dropout_d,
+                                                ctx_dropout=ctx_dropout_d,
+                                                rec_dropout=rec_dropout_d,
+                                                truncate_gradient=options['decoder_truncate_gradient'],
+                                                profile=profile)
+        # get the next hidden state
+        next_state = proj[0]
+    
+        # get the weighted averages of context for this target word y
+        ctxs = proj[1]
+    
+        # alignment matrix (attention model)
+        dec_alphas = proj[2]
+    
+        if options['use_dropout'] and options['model_version'] < 0.1:
+            next_state_up = next_state * retain_probability_hidden
+            emb *= retain_probability_emb
+            ctxs *= retain_probability_hidden
+        else:
+            next_state_up = next_state
+    
+        logit_lstm = layers.get_layer_constr('ff')(tparams, next_state_up, options,
+                                        prefix='ff_logit_lstm', activ='linear')
+        logit_prev = layers.get_layer_constr('ff')(tparams, emb, options,
+                                        prefix='ff_logit_prev', activ='linear')
+        logit_ctx = layers.get_layer_constr('ff')(tparams, ctxs, options,
+                                       prefix='ff_logit_ctx', activ='linear')
+        logit = tensor.tanh(logit_lstm+logit_prev+logit_ctx)
+    
+        if options['use_dropout'] and options['model_version'] < 0.1:
+            logit *= retain_probability_hidden
+    
+        logit_W = tparams['Wemb' + decoder_embedding_suffix].T if options['tie_decoder_embeddings'] else None
+        logit = layers.get_layer_constr('ff')(tparams, logit, options,
+                                prefix='ff_logit', activ='linear', W=logit_W)
+    
+        # compute the softmax probability
+        next_probs = tensor.nnet.softmax(logit)
+    
+        # sample from softmax distribution to get the sample
+        next_sample = trng.multinomial(pvals=next_probs).argmax(1)
+    
+        # compile a function to do the whole thing above, next word probability,
+        # sampled word for the next target, next hidden state to be used
+        print >>sys.stderr, 'Building f_next..',
+        inps = [y, ctx, init_state]
+        outs = [next_probs, next_sample, next_state]
+    
+        if return_alignment:
+            outs.append(dec_alphas)
+    
+        f_next = theano.function(inps, outs, name='f_next', profile=profile)
+        print >>sys.stderr, 'Done'
+        self.f_init = f_init
+        self.f_next = f_next
+        return f_init, f_next
+    
+    def gen_sample(self, x, trng=None, k=1, maxlen=30,
+               stochastic=True, argmax=False, return_alignment=False, suppress_unk=False,
+               return_hyp_graph=False):
+        
+        f_init = [self.f_init]
+        f_next = [self.f_next]
+        
+        
+        # k is the beam size we have
+        if k > 1 and argmax:
+            assert not stochastic, \
+                'Beam search does not support stochastic sampling with argmax'
+    
+        sample = []
+        sample_score = []
+        sample_word_probs = []
+        alignment = []
+        hyp_graph = None
+        if stochastic:
+            if argmax:
+                sample_score = 0
+            live_k=k
+        else:
+            live_k = 1
+    
+        if return_hyp_graph:
+            from hypgraph import HypGraph
+            hyp_graph = HypGraph()
+    
+        dead_k = 0
+    
+        hyp_samples=[ [] for i in xrange(live_k) ]
+        word_probs=[ [] for i in xrange(live_k) ]
+        hyp_scores = numpy.zeros(live_k).astype('float32')
+        hyp_states = []
+        if return_alignment:
+            hyp_alignment = [[] for _ in xrange(live_k)]
+    
+        # for ensemble decoding, we keep track of states and probability distribution
+        # for each model in the ensemble
+        num_models = len(f_init)
+        next_state = [None]*num_models
+        ctx0 = [None]*num_models
+        next_p = [None]*num_models
+        dec_alphas = [None]*num_models
+        # get initial state of decoder rnn and encoder context
+        for i in xrange(num_models):
+            ret = f_init[i](x)
+            next_state[i] = numpy.tile( ret[0] , (live_k,1))
+            ctx0[i] = ret[1]
+        next_w = -1 * numpy.ones((live_k,)).astype('int64')  # bos indicator
+    
+        # x is a sequence of word ids followed by 0, eos id
+        for ii in xrange(maxlen):
+            for i in xrange(num_models):
+                ctx = numpy.tile(ctx0[i], [live_k, 1])
+                inps = [next_w, ctx, next_state[i]]
+                ret = f_next[i](*inps)
+                # dimension of dec_alpha (k-beam-size, number-of-input-hidden-units)
+                next_p[i], next_w_tmp, next_state[i] = ret[0], ret[1], ret[2]
+                if return_alignment:
+                    dec_alphas[i] = ret[3]
+    
+                if suppress_unk:
+                    next_p[i][:,1] = -numpy.inf
+            if stochastic:
+                #batches are not supported with argmax: output data structure is different
+                if argmax:
+                    nw = sum(next_p)[0].argmax()
+                    sample.append(nw)
+                    sample_score += numpy.log(next_p[0][0, nw])
+                    if nw == 0:
+                        break
+                else:
+                    #FIXME: sampling is currently performed according to the last model only
+                    nws = next_w_tmp
+                    cand_scores = numpy.array(hyp_scores)[:, None] - numpy.log(next_p[-1])
+                    probs = next_p[-1]
+    
+                    for idx,nw in enumerate(nws):
+                        hyp_samples[idx].append(nw)
+    
+    
+                    hyp_states=[]
+                    for ti in xrange(live_k):
+                        hyp_states.append([copy.copy(next_state[i][ti]) for i in xrange(num_models)])
+                        hyp_scores[ti]=cand_scores[ti][nws[ti]]
+                        word_probs[ti].append(probs[ti][nws[ti]])
+    
+                    new_hyp_states=[]
+                    new_hyp_samples=[]
+                    new_hyp_scores=[]
+                    new_word_probs=[]
+                    for hyp_sample,hyp_state, hyp_score, hyp_word_prob in zip(hyp_samples,hyp_states,hyp_scores, word_probs):
+                        if hyp_sample[-1]  > 0:
+                            new_hyp_samples.append(copy.copy(hyp_sample))
+                            new_hyp_states.append(copy.copy(hyp_state))
+                            new_hyp_scores.append(hyp_score)
+                            new_word_probs.append(hyp_word_prob)
+                        else:
+                            sample.append(copy.copy(hyp_sample))
+                            sample_score.append(hyp_score)
+                            sample_word_probs.append(hyp_word_prob)
+    
+                    hyp_samples=new_hyp_samples
+                    hyp_states=new_hyp_states
+                    hyp_scores=new_hyp_scores
+                    word_probs=new_word_probs
+    
+                    live_k=len(hyp_samples)
+                    if live_k < 1:
+                        break
+    
+                    next_w = numpy.array([w[-1] for w in hyp_samples])
+                    next_state = [numpy.array(state) for state in zip(*hyp_states)]
+            else:
+                cand_scores = hyp_scores[:, None] - sum(numpy.log(next_p))
+                probs = sum(next_p)/num_models
+                cand_flat = cand_scores.flatten()
+                probs_flat = probs.flatten()
+                ranks_flat = cand_flat.argpartition(k-dead_k-1)[:(k-dead_k)]
+    
+                #averaging the attention weights accross models
+                if return_alignment:
+                    mean_alignment = sum(dec_alphas)/num_models
+    
+                voc_size = next_p[0].shape[1]
+                # index of each k-best hypothesis
+                trans_indices = ranks_flat / voc_size
+                word_indices = ranks_flat % voc_size
+                costs = cand_flat[ranks_flat]
+    
+                new_hyp_samples = []
+                new_hyp_scores = numpy.zeros(k-dead_k).astype('float32')
+                new_word_probs = []
+                new_hyp_states = []
+                if return_alignment:
+                    # holds the history of attention weights for each time step for each of the surviving hypothesis
+                    # dimensions (live_k * target_words * source_hidden_units]
+                    # at each time step we append the attention weights corresponding to the current target word
+                    new_hyp_alignment = [[] for _ in xrange(k-dead_k)]
+    
+                # ti -> index of k-best hypothesis
+                for idx, [ti, wi] in enumerate(zip(trans_indices, word_indices)):
+                    new_hyp_samples.append(hyp_samples[ti]+[wi])
+                    new_word_probs.append(word_probs[ti] + [probs_flat[ranks_flat[idx]].tolist()])
+                    new_hyp_scores[idx] = copy.copy(costs[idx])
+                    new_hyp_states.append([copy.copy(next_state[i][ti]) for i in xrange(num_models)])
+                    if return_alignment:
+                        # get history of attention weights for the current hypothesis
+                        new_hyp_alignment[idx] = copy.copy(hyp_alignment[ti])
+                        # extend the history with current attention weights
+                        new_hyp_alignment[idx].append(mean_alignment[ti])
+    
+    
+                # check the finished samples
+                new_live_k = 0
+                hyp_samples = []
+                hyp_scores = []
+                hyp_states = []
+                word_probs = []
+                if return_alignment:
+                    hyp_alignment = []
+    
+                # sample and sample_score hold the k-best translations and their scores
+                for idx in xrange(len(new_hyp_samples)):
+                    if return_hyp_graph:
+                        word, history = new_hyp_samples[idx][-1], new_hyp_samples[idx][:-1]
+                        score = new_hyp_scores[idx]
+                        word_prob = new_word_probs[idx][-1]
+                        hyp_graph.add(word, history, word_prob=word_prob, cost=score)
+                    if new_hyp_samples[idx][-1] == 0:
+                        sample.append(copy.copy(new_hyp_samples[idx]))
+                        sample_score.append(new_hyp_scores[idx])
+                        sample_word_probs.append(new_word_probs[idx])
+                        if return_alignment:
+                            alignment.append(new_hyp_alignment[idx])
+                        dead_k += 1
+                    else:
+                        new_live_k += 1
+                        hyp_samples.append(copy.copy(new_hyp_samples[idx]))
+                        hyp_scores.append(new_hyp_scores[idx])
+                        hyp_states.append(copy.copy(new_hyp_states[idx]))
+                        word_probs.append(new_word_probs[idx])
+                        if return_alignment:
+                            hyp_alignment.append(new_hyp_alignment[idx])
+                hyp_scores = numpy.array(hyp_scores)
+    
+                live_k = new_live_k
+    
+                if new_live_k < 1:
+                    break
+                if dead_k >= k:
+                    break
+    
+                next_w = numpy.array([w[-1] for w in hyp_samples])
+                next_state = [numpy.array(state) for state in zip(*hyp_states)]
+    
+        # dump every remaining one
+        if not argmax and live_k > 0:
+            for idx in xrange(live_k):
+                sample.append(hyp_samples[idx])
+                sample_score.append(hyp_scores[idx])
+                sample_word_probs.append(word_probs[idx])
+                if return_alignment:
+                    alignment.append(hyp_alignment[idx])
+    
+        if not return_alignment:
+            alignment = [None for i in range(len(sample))]
+    
+        return sample, sample_score, sample_word_probs, alignment, hyp_graph
+
+    
+        
+
 
     
     
