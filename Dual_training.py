@@ -21,15 +21,57 @@ import itertools
 from subprocess import Popen
 
 from collections import OrderedDict
-
+import NMT.data_iterator as data_iterator
 profile = False
 
-dataset_en = "data/train10/train10.en.tok"
-dataset_fr = "data/train10/train10.fr.tok"
-vocal_en = "data/train10/train10.en.tok.pkl"
-vocal_fr = "data/train10/train10.fr.tok.pkl"
-test_en = "data/test10/test10.en.tok"
-test_fr = "data/test10/test10.fr.tok"
+dataset_en = "/people/minhquang/Dual_NMT/data/train10/train10.en.tok"
+dataset_fr = "/people/minhquang/Dual_NMT/data/train10/train10.fr.tok"
+vocal_en = "/people/minhquang/Dual_NMT/data/train10/train10.en.tok.pkl"
+vocal_fr = "/people/minhquang/Dual_NMT/data/train10/train10.fr.tok.pkl"
+test_en = "/people/minhquang/Dual_NMT/data/test10/test10.en.tok"
+test_fr = "/people/minhquang/Dual_NMT/data/test10/test10.fr.tok"
+
+def prepare_data(seqs_x, seqs_y, maxlen=None, n_words_src=30000,
+                 n_words=30000):
+    # x: a list of sentences
+    lengths_x = [len(s) for s in seqs_x]
+    lengths_y = [len(s) for s in seqs_y]
+
+    if maxlen is not None:
+        new_seqs_x = []
+        new_seqs_y = []
+        new_lengths_x = []
+        new_lengths_y = []
+        for l_x, s_x, l_y, s_y in zip(lengths_x, seqs_x, lengths_y, seqs_y):
+            if l_x < maxlen and l_y < maxlen:
+                new_seqs_x.append(s_x)
+                new_lengths_x.append(l_x)
+                new_seqs_y.append(s_y)
+                new_lengths_y.append(l_y)
+        lengths_x = new_lengths_x
+        seqs_x = new_seqs_x
+        lengths_y = new_lengths_y
+        seqs_y = new_seqs_y
+
+        if len(lengths_x) < 1 or len(lengths_y) < 1:
+            return None, None, None, None
+
+    n_samples = len(seqs_x)
+    n_factors = len(seqs_x[0][0])
+    maxlen_x = numpy.max(lengths_x) + 1
+    maxlen_y = numpy.max(lengths_y) + 1
+
+    x = numpy.zeros((n_factors, maxlen_x, n_samples)).astype('int64')
+    y = numpy.zeros((maxlen_y, n_samples)).astype('int64')
+    x_mask = numpy.zeros((maxlen_x, n_samples)).astype('float32')
+    y_mask = numpy.zeros((maxlen_y, n_samples)).astype('float32')
+    for idx, [s_x, s_y] in enumerate(zip(seqs_x, seqs_y)):
+        x[:, :lengths_x[idx], idx] = zip(*s_x)
+        x_mask[:lengths_x[idx]+1, idx] = 1.
+        y[:lengths_y[idx], idx] = s_y
+        y_mask[:lengths_y[idx]+1, idx] = 1.
+
+    return x, x_mask, y, y_mask
 
 def train(dim_word=512,  # word vector dimensionality
               dim=1000,  # the number of LSTM units
@@ -48,7 +90,7 @@ def train(dim_word=512,  # word vector dimensionality
               optimizer='adam',
               batch_size=16,
               valid_batch_size=16,
-              saveto='models/model.npz',
+              saveto='models/model_dual.npz',
               validFreq=10000,
               saveFreq=30000,   # save the parameters after every saveFreq updates
               sampleFreq=10000,   # generate some samples after every sampleFreq
@@ -62,11 +104,6 @@ def train(dim_word=512,  # word vector dimensionality
               overwrite=False,
               external_validation_script=None,
               sort_by_length=True,
-              use_domain_interpolation=False, # interpolate between an out-domain training corpus and an in-domain training corpus
-              domain_interpolation_min=0.1, # minimum (initial) fraction of in-domain training data
-              domain_interpolation_max=1.0, # maximum fraction of in-domain training data
-              domain_interpolation_inc=0.1, # interpolation increment to be applied each time patience runs out, until maximum amount of interpolation is reached
-              domain_interpolation_indomain_datasets=['indomain.en', 'indomain.fr'], # in-domain parallel training corpus
               maxibatch_size=20, #How many minibatches to load at one time
               model_version=0.1, #store version used for training for compatibility
               prior_model=None, # Prior model file, used for MAP
@@ -115,8 +152,76 @@ def train(dim_word=512,  # word vector dimensionality
     nmt_en_fr.build_model()
     nmt_fr_en.build_model()
     
-    nmt_en_fr.
-
+    nmt_en_fr.build_sampler()
+    
+    train = NMT.data_iterator.TextIterator(dataset_en, dataset_fr,
+                         [vocal_en], vocal_fr,
+                         n_words_source=n_words_src, n_words_target=n_words,
+                         batch_size=batch_size,
+                         maxlen=maxlen,
+                         skip_empty=True,
+                         shuffle_each_epoch = True,
+                         sort_by_length=sort_by_length,
+                         maxibatch_size=maxibatch_size)
+    x,y = train.next()
+    x, x_mask, y, y_mask = prepare_data(x, y, maxlen=maxlen,
+                                                    n_words_src=n_words_src,
+                                                    n_words=n_words)
+    for jj in xrange(numpy.minimum(5, x.shape[2])):
+        stochastic = True
+        x_current = x[:, :, jj][:, :, None]
+        # remove padding
+        x_current = x_current[:,:x_mask.astype('int64')[:, jj].sum(),:]
+        
+        #print(x_current)
+        sample, score, sample_word_probs, alignment, hyp_graph = nmt_en_fr.gen_sample(
+                                   x_current,
+                                   k=5,
+                                   maxlen=30,
+                                   stochastic=stochastic,
+                                   argmax=False,
+                                   suppress_unk=False,
+                                   return_hyp_graph=False)
+        """
+        print 'Source ', jj, ': ',
+        for pos in range(x.shape[1]):
+            if x[0, pos, jj] == 0:
+                break
+            for factor in range(factors):
+                vv = x[factor, pos, jj]
+                if vv in nmt_en_fr.worddicts_r[factor]:
+                    sys.stdout.write(nmt_en_fr.worddicts_r[factor][vv])
+                else:
+                    sys.stdout.write('UNK')
+                if factor+1 < factors:
+                    sys.stdout.write('|')
+                else:
+                    sys.stdout.write(' ')
+        print
+        print 'Truth ', jj, ' : ',
+        for vv in y[:, jj]:
+            if vv == 0:
+                break
+            if vv in nmt_en_fr.worddicts_r[-1]:
+                print nmt_en_fr.worddicts_r[-1][vv],
+            else:
+                print 'UNK',
+        print
+        print 'Sample ', jj, ': ',
+        for ss in sample:
+            for vv in ss:
+                if vv == 0:
+                    break
+                if vv in nmt_en_fr.worddicts_r[-1]:
+                    print nmt_en_fr.worddicts_r[-1][vv],
+                else:
+                    print 'UNK',
+            print "\n"
+        """
+        for i in range(5):
+            print(sample_word_probs[i])
+            print(score[i])
+            print(score[i] + numpy.log(sample_word_probs[i]).sum())
     return 0
 
 train()
