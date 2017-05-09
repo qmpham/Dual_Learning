@@ -1,0 +1,73 @@
+{
+  "batch_size": 80, 
+  "clip_c": 1, 
+  "datasets": [
+    "/people/minhquang/nematus-master/data/train10/train10.en.tok", 
+    "/people/minhquang/nematus-master/data/train10/train10.fr.tok"
+  ], 
+  "decay_c": 0, 
+  "decoder": "gru_cond", 
+  "decoder_truncate_gradient": -1, 
+  "dictionaries": [
+    "/people/minhquang/nematus-master/data/train10/train10.en.tok.pkl", 
+    "/people/minhquang/nematus-master/data/train10/train10.fr.tok.pkl"
+  ], 
+  "dim": 1000, 
+  "dim_per_factor": [
+    512
+  ], 
+  "dim_word": 512, 
+  "dispFreq": 10, 
+  "domain_interpolation_inc": 0.1, 
+  "domain_interpolation_indomain_datasets": [
+    "indomain.en", 
+    "indomain.fr"
+  ], 
+  "domain_interpolation_max": 1.0, 
+  "domain_interpolation_min": 0.1, 
+  "dropout_embedding": 0.2, 
+  "dropout_hidden": 0.2, 
+  "dropout_source": 0, 
+  "dropout_target": 0, 
+  "encoder": "gru", 
+  "encoder_truncate_gradient": -1, 
+  "external_validation_script": null, 
+  "factors": 1, 
+  "finish_after": 10000000, 
+  "lrate": 0.0001, 
+  "map_decay_c": 0, 
+  "max_epochs": 5000, 
+  "maxibatch_size": 20, 
+  "maxlen": 100, 
+  "model_version": 0.1, 
+  "mrt_alpha": 0.005, 
+  "mrt_loss": "SENTENCEBLEU n=4", 
+  "mrt_ml_mix": 0, 
+  "mrt_reference": false, 
+  "mrt_samples": 100, 
+  "mrt_samples_meanloss": 10, 
+  "n_words": 9058, 
+  "n_words_src": 7604, 
+  "objective": "CE", 
+  "optimizer": "adam", 
+  "overwrite": false, 
+  "patience": 10, 
+  "prior_model": null, 
+  "reload_": false, 
+  "reload_training_progress": true, 
+  "sampleFreq": 1000, 
+  "saveFreq": 30000, 
+  "saveto": "model.npz", 
+  "shuffle_each_epoch": true, 
+  "sort_by_length": true, 
+  "tie_decoder_embeddings": false, 
+  "tie_encoder_decoder_embeddings": false, 
+  "use_domain_interpolation": false, 
+  "use_dropout": false, 
+  "validFreq": 5000, 
+  "valid_batch_size": 80, 
+  "valid_datasets": [
+    "/people/minhquang/nematus-master/data/test/test10/test10.en.tok", 
+    "/people/minhquang/nematus-master/data/test/test10/test10.fr.tok"
+  ]
+}
