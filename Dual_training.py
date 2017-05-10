@@ -2,7 +2,7 @@ import NMT
 import LM
 from NMT.dualnmt import dualnmt
 import theano
-import theano.tensor as tensor
+import theano.tensor as T
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
 import cPickle as pkl
@@ -22,14 +22,36 @@ from subprocess import Popen
 
 from collections import OrderedDict
 import NMT.data_iterator as data_iterator
+import NMT.theano_util as theano_util
 profile = False
 
-dataset_en = "/people/minhquang/Dual_NMT/data/train10/train10.en.tok"
-dataset_fr = "/people/minhquang/Dual_NMT/data/train10/train10.fr.tok"
+dataset_bi_en = "/people/minhquang/Dual_NMT/data/train10/train10.en.tok"
+dataset_bi_fr = "/people/minhquang/Dual_NMT/data/train10/train10.fr.tok"
+dataset_mono_en = ""
+dataset_mono_fr = ""
 vocal_en = "/people/minhquang/Dual_NMT/data/train10/train10.en.tok.pkl"
 vocal_fr = "/people/minhquang/Dual_NMT/data/train10/train10.fr.tok.pkl"
 test_en = "/people/minhquang/Dual_NMT/data/test10/test10.en.tok"
 test_fr = "/people/minhquang/Dual_NMT/data/test10/test10.fr.tok"
+path = "/people/minhquang/Dual_NMT/models/model.iter30000.npz"
+
+
+def dual_ascent(lr, tparams, grads, reward, optimizer_params = None):     
+    
+    g_shared = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_grad_shared' % k) \
+                for k,p in tparams.iteritems() ]
+    g_up = [(g1, g2) for g1,g2 in zip(g_shared,grads)]
+    
+    avg_reward = T.mean(reward)
+    
+    f_grad_shared = theano.function([reward], avg_reward, updates = g_up)
+    
+    params_up = [(p , p + lr * g) for p,g in zip(theano_util.itemlist(tparams), g_shared)]
+    
+    f_update = theano.function([lr], [], updates = params_up)
+    
+    return f_grad_shared, f_update
+
 
 def prepare_data(seqs_x, seqs_y, maxlen=None, n_words_src=30000,
                  n_words=30000):
@@ -131,30 +153,58 @@ def train(dim_word=512,  # word vector dimensionality
     model_options_fr_en = model_options.copy()
     model_options_en_fr = model_options.copy()
         
-    model_options_fr_en["datasets"] = [dataset_fr,dataset_en]
+    model_options_fr_en["datasets_bi"] = [dataset_bi_fr,dataset_bi_en]
+    model_options_fr_en["datasets_mono"] = dataset_mono_fr
     model_options_fr_en["dictionaries"] = [vocal_fr,vocal_en]
-    model_options_en_fr["datasets"] = [dataset_en,dataset_fr]
+    
+    model_options_en_fr["datasets_mono"] = dataset_mono_en
+    model_options_en_fr["datasets_bi"] = [dataset_bi_en,dataset_bi_fr]
     model_options_en_fr["dictionaries"] = [vocal_en,vocal_fr]
+    
     # Intilize params and tparams
     nmt_en_fr = dualnmt()
-    nmt_fr_en = dualnmt()
+    #nmt_fr_en = dualnmt()
     
     nmt_en_fr.get_options(model_options_en_fr)
-    nmt_fr_en.get_options(model_options_fr_en)
+    #nmt_fr_en.get_options(model_options_fr_en)
+    
     nmt_en_fr.invert_dict()
-    nmt_fr_en.invert_dict()
+    #nmt_fr_en.invert_dict()
     
     nmt_en_fr.init_params()
-    nmt_fr_en.init_params()
+    #nmt_fr_en.init_params()
+    
+    #load params
+    
+    nmt_en_fr.load_params(path)
     
     # build models
+    trng, use_noise, x_bi, x_bi_mask, y_bi, y_bi_mask, opt_ret, cost = nmt_en_fr.build_model()
     
-    nmt_en_fr.build_model()
-    nmt_fr_en.build_model()
+    # Compute gradient
+    reward = T.vector("reward")
+    new_cost = T.mean(reward * (-cost))
     
-    nmt_en_fr.build_sampler()
+    tparams = nmt_en_fr.tparams
+    inps = [x_bi, x_bi_mask, y_bi, y_bi_mask]
+    # gradient newcost = gradient( reward * -cost) = sum reward_i * gradient( -cost_i) = reward_i * gradient(log p(s_mid | s))
     
-    train = NMT.data_iterator.TextIterator(dataset_en, dataset_fr,
+    grad = T.grad(new_cost,wrt=theano_util.itemlist(tparams)) 
+
+    f = theano.function(inps+[reward],grad)
+    lr = T.scalar('lrate')
+    f_grad_shared, f_update = dual_ascent(lr, tparams, grads, reward) 
+    
+    
+    
+    #nmt_fr_en.build_model()
+    
+    #build samplers
+    #nmt_en_fr.build_sampler()
+    
+    
+    #test samplers
+    train_bi = NMT.data_iterator.TextIterator(dataset_bi_en, dataset_bi_fr,
                          [vocal_en], vocal_fr,
                          n_words_source=n_words_src, n_words_target=n_words,
                          batch_size=batch_size,
@@ -163,10 +213,12 @@ def train(dim_word=512,  # word vector dimensionality
                          shuffle_each_epoch = True,
                          sort_by_length=sort_by_length,
                          maxibatch_size=maxibatch_size)
-    x,y = train.next()
-    x, x_mask, y, y_mask = prepare_data(x, y, maxlen=maxlen,
+    x_bi,y_bi = train_bi.next()
+    x_bi, x_bi_mask, y_bi, y_bi_mask = prepare_data(x_bi, y_bi, maxlen=maxlen,
                                                     n_words_src=n_words_src,
                                                     n_words=n_words)
+    #print(f(x_bi, x_bi_mask, y_bi, y_bi_mask, numpy.ones(x_bi_mask.shape[1],dtype=numpy.float32)))
+    """
     for jj in xrange(numpy.minimum(5, x.shape[2])):
         stochastic = True
         x_current = x[:, :, jj][:, :, None]
@@ -182,7 +234,7 @@ def train(dim_word=512,  # word vector dimensionality
                                    argmax=False,
                                    suppress_unk=False,
                                    return_hyp_graph=False)
-        """
+        
         print 'Source ', jj, ': ',
         for pos in range(x.shape[1]):
             if x[0, pos, jj] == 0:
@@ -217,11 +269,13 @@ def train(dim_word=512,  # word vector dimensionality
                 else:
                     print 'UNK',
             print "\n"
-        """
+      
         for i in range(5):
             print(sample_word_probs[i])
             print(score[i])
-            print(score[i] + numpy.log(sample_word_probs[i]).sum())
+            print(score[i] + numpy.log(sample_word_probs[i]).sum())"""
+            
+    
     return 0
 
 train()
