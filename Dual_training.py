@@ -1,6 +1,7 @@
 import NMT
 import LM
 from NMT.dualnmt import dualnmt
+from LM.lm import lm
 import theano
 import theano.tensor as T
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
@@ -25,18 +26,18 @@ import NMT.data_iterator as data_iterator
 import NMT.theano_util as theano_util
 profile = False
 
-dataset_bi_en = "/people/minhquang/Dual_NMT/data/train10/train10.en.tok"
-dataset_bi_fr = "/people/minhquang/Dual_NMT/data/train10/train10.fr.tok"
+dataset_bi_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok"
+dataset_bi_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok"
 dataset_mono_en = ""
 dataset_mono_fr = ""
-vocal_en = "/people/minhquang/Dual_NMT/data/train10/train10.en.tok.pkl"
-vocal_fr = "/people/minhquang/Dual_NMT/data/train10/train10.fr.tok.pkl"
-test_en = "/people/minhquang/Dual_NMT/data/test10/test10.en.tok"
-test_fr = "/people/minhquang/Dual_NMT/data/test10/test10.fr.tok"
+vocal_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok.pkl"
+vocal_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok.pkl"
+test_en = "/people/minhquang/Dual_NMT/data/validation/devel03/devel03.en.tok"
+test_fr = "/people/minhquang/Dual_NMT/data/validation/devel03/devel03.fr.tok"
 path = "/people/minhquang/Dual_NMT/models/model.iter30000.npz"
 
 
-def dual_ascent(lr, tparams, grads, reward, optimizer_params = None):     
+def dual_ascent(lr, tparams, grads, inps, reward, optimizer_params = None):     
     
     g_shared = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_grad_shared' % k) \
                 for k,p in tparams.iteritems() ]
@@ -44,7 +45,7 @@ def dual_ascent(lr, tparams, grads, reward, optimizer_params = None):
     
     avg_reward = T.mean(reward)
     
-    f_grad_shared = theano.function([reward], avg_reward, updates = g_up)
+    f_grad_shared = theano.function(inps + [reward], avg_reward, updates = g_up)
     
     params_up = [(p , p + lr * g) for p,g in zip(theano_util.itemlist(tparams), g_shared)]
     
@@ -52,8 +53,37 @@ def dual_ascent(lr, tparams, grads, reward, optimizer_params = None):
     
     return f_grad_shared, f_update
 
+# batch preparation, returns padded batch and mask
+def prepare_data_mono(seqs_x, maxlen=None, n_words=30000):
+    # x: a list of sentences
+    lengths_x = [len(s) for s in seqs_x]
 
-def prepare_data(seqs_x, seqs_y, maxlen=None, n_words_src=30000,
+    # filter according to mexlen
+    if maxlen is not None:
+        new_seqs_x = []
+        new_lengths_x = []
+        for l_x, s_x in zip(lengths_x, seqs_x):
+            if l_x < maxlen:
+                new_seqs_x.append(s_x)
+                new_lengths_x.append(l_x)
+        lengths_x = new_lengths_x
+        seqs_x = new_seqs_x
+
+        if len(lengths_x) < 1:
+            return None, None, None, None
+
+    n_samples = len(seqs_x)
+    maxlen_x = numpy.max(lengths_x) + 1
+
+    x = numpy.zeros((maxlen_x, n_samples)).astype('int64')
+    x_mask = numpy.zeros((maxlen_x, n_samples)).astype('float32')
+    for idx, s_x in enumerate(seqs_x):
+        x[:lengths_x[idx], idx] = s_x
+        x_mask[:lengths_x[idx]+1, idx] = 1.
+
+    return x, x_mask
+
+def prepare_data_bi(seqs_x, seqs_y, maxlen=None, n_words_src=30000,
                  n_words=30000):
     # x: a list of sentences
     lengths_x = [len(s) for s in seqs_x]
@@ -137,21 +167,23 @@ def train(dim_word=512,  # word vector dimensionality
     # Translation Model:
         
     # Model options
-    model_options = OrderedDict(sorted(locals().copy().items()))
+    
+    model_options_trans = OrderedDict(sorted(locals().copy().items()))
+    model_options_mono = OrderedDict()
+    
 
-
-    if model_options['dim_per_factor'] == None:
+    if model_options_trans['dim_per_factor'] == None:
         if factors == 1:
-            model_options['dim_per_factor'] = [model_options['dim_word']]
+            model_options_trans['dim_per_factor'] = [model_options_trans['dim_word']]
         else:
             sys.stderr.write('Error: if using factored input, you must specify \'dim_per_factor\'\n')
             sys.exit(1)
 
-    assert(len(model_options['dim_per_factor']) == factors) # each factor embedding has its own dimensionality
-    assert(sum(model_options['dim_per_factor']) == model_options['dim_word']) # dimensionality of factor embeddings sums up to total dimensionality of input embedding vector
+    assert(len(model_options_trans['dim_per_factor']) == factors) # each factor embedding has its own dimensionality
+    assert(sum(model_options_trans['dim_per_factor']) == model_options_trans['dim_word']) # dimensionality of factor embeddings sums up to total dimensionality of input embedding vector
     
-    model_options_fr_en = model_options.copy()
-    model_options_en_fr = model_options.copy()
+    model_options_fr_en = model_options_trans.copy()
+    model_options_en_fr = model_options_trans.copy()
         
     model_options_fr_en["datasets_bi"] = [dataset_bi_fr,dataset_bi_en]
     model_options_fr_en["datasets_mono"] = dataset_mono_fr
@@ -165,7 +197,7 @@ def train(dim_word=512,  # word vector dimensionality
     nmt_en_fr = dualnmt()
     #nmt_fr_en = dualnmt()
     
-    nmt_en_fr.get_options(model_options_en_fr)
+    nmt_en_fr.get_options(model_options_en_fr)   
     #nmt_fr_en.get_options(model_options_fr_en)
     
     nmt_en_fr.invert_dict()
@@ -183,26 +215,45 @@ def train(dim_word=512,  # word vector dimensionality
     
     # Compute gradient
     reward = T.vector("reward")
+    # -cost = log(p(s_mid|s))
     new_cost = T.mean(reward * (-cost))
     
     tparams = nmt_en_fr.tparams
     inps = [x_bi, x_bi_mask, y_bi, y_bi_mask]
-    # gradient newcost = gradient( reward * -cost) = sum reward_i * gradient( -cost_i) = reward_i * gradient(log p(s_mid | s))
+    # gradient newcost = gradient( reward * -cost) = avg reward_i * gradient( -cost_i) = avg reward_i * gradient(log p(s_mid | s)) stochastic approxiamtion of policy gradient
     
     grad = T.grad(new_cost,wrt=theano_util.itemlist(tparams)) 
 
     f = theano.function(inps+[reward],grad)
+    #build f_grad_shared: average rexards, f_update: update params by gradient newcost
     lr = T.scalar('lrate')
-    f_grad_shared, f_update = dual_ascent(lr, tparams, grads, reward) 
+    f_grad_shared_en_fr, f_update_en_fr = dual_ascent(lr, tparams, grad, inps, reward) 
     
-    
-    
-    #nmt_fr_en.build_model()
-    
+        
     #build samplers
     #nmt_en_fr.build_sampler()
     
+    #build language model
+    model_options_mono['encoder'] = 'gru'
+    model_options_mono['dim'] = 1000
+    model_options_mono['dim_word'] = 100
+    model_options_mono['n_words'] = 100000
+    lm_en = lm()
+    lm_fr = lm()
     
+    lm_en.get_options(model_options_mono)
+    lm_fr.get_options(model_options_mono)
+    
+    lm_en.init_params()
+    lm_fr.init_rarams()
+    
+    lm_en.init_tparams()
+    lm_fr.init_tparams()
+    
+    
+    
+    lm_en.build_model()
+    """
     #test samplers
     train_bi = NMT.data_iterator.TextIterator(dataset_bi_en, dataset_bi_fr,
                          [vocal_en], vocal_fr,
@@ -214,11 +265,11 @@ def train(dim_word=512,  # word vector dimensionality
                          sort_by_length=sort_by_length,
                          maxibatch_size=maxibatch_size)
     x_bi,y_bi = train_bi.next()
-    x_bi, x_bi_mask, y_bi, y_bi_mask = prepare_data(x_bi, y_bi, maxlen=maxlen,
+    x_bi, x_bi_mask, y_bi, y_bi_mask = prepare_data_bi(x_bi, y_bi, maxlen=maxlen,
                                                     n_words_src=n_words_src,
                                                     n_words=n_words)
     #print(f(x_bi, x_bi_mask, y_bi, y_bi_mask, numpy.ones(x_bi_mask.shape[1],dtype=numpy.float32)))
-    """
+    
     for jj in xrange(numpy.minimum(5, x.shape[2])):
         stochastic = True
         x_current = x[:, :, jj][:, :, None]
