@@ -28,14 +28,16 @@ profile = False
 
 dataset_bi_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok"
 dataset_bi_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok"
-dataset_mono_en = ""
-dataset_mono_fr = ""
+dataset_mono_en = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
+dataset_mono_fr = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
 vocal_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok.pkl"
 vocal_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok.pkl"
 test_en = "/people/minhquang/Dual_NMT/data/validation/devel03/devel03.en.tok"
 test_fr = "/people/minhquang/Dual_NMT/data/validation/devel03/devel03.fr.tok"
-path = "/people/minhquang/Dual_NMT/models/model.iter30000.npz"
-
+path_trans_en_fr = "/people/minhquang/Dual_NMT/models/NMT/model_hal.iter132500.npz"
+path_trans_en_fr = ""
+path_mono_en = ""
+path_mono_fr = ""
 
 def dual_ascent(lr, tparams, grads, inps, reward, optimizer_params = None):     
     
@@ -163,6 +165,7 @@ def train(dim_word=512,  # word vector dimensionality
               tie_decoder_embeddings=False, # Tie the input embeddings of the decoder with the softmax output embeddings
               encoder_truncate_gradient=-1, # Truncate BPTT gradients in the encoder to this value. Use -1 for no truncation
               decoder_truncate_gradient=-1, # Truncate BPTT gradients in the decoder to this value. Use -1 for no truncation
+              alpha = 0.5
         ):
     # Translation Model:
         
@@ -171,7 +174,6 @@ def train(dim_word=512,  # word vector dimensionality
     model_options_trans = OrderedDict(sorted(locals().copy().items()))
     model_options_mono = OrderedDict()
     
-
     if model_options_trans['dim_per_factor'] == None:
         if factors == 1:
             model_options_trans['dim_per_factor'] = [model_options_trans['dim_word']]
@@ -215,6 +217,7 @@ def train(dim_word=512,  # word vector dimensionality
     
     # Compute gradient
     reward = T.vector("reward")
+    
     # -cost = log(p(s_mid|s))
     new_cost = T.mean(reward * (-cost))
     
@@ -231,7 +234,9 @@ def train(dim_word=512,  # word vector dimensionality
     
         
     #build samplers
-    #nmt_en_fr.build_sampler()
+    nmt_en_fr.build_sampler()
+    
+    
     
     #build language model
     model_options_mono['encoder'] = 'gru'
@@ -245,86 +250,67 @@ def train(dim_word=512,  # word vector dimensionality
     lm_fr.get_options(model_options_mono)
     
     lm_en.init_params()
-    lm_fr.init_rarams()
+    #lm_fr.init_params()
     
     lm_en.init_tparams()
-    lm_fr.init_tparams()
-    
-    
+    #lm_fr.init_tparams()
     
     lm_en.build_model()
-    """
-    #test samplers
-    train_bi = NMT.data_iterator.TextIterator(dataset_bi_en, dataset_bi_fr,
-                         [vocal_en], vocal_fr,
-                         n_words_source=n_words_src, n_words_target=n_words,
-                         batch_size=batch_size,
-                         maxlen=maxlen,
-                         skip_empty=True,
-                         shuffle_each_epoch = True,
-                         sort_by_length=sort_by_length,
-                         maxibatch_size=maxibatch_size)
-    x_bi,y_bi = train_bi.next()
-    x_bi, x_bi_mask, y_bi, y_bi_mask = prepare_data_bi(x_bi, y_bi, maxlen=maxlen,
-                                                    n_words_src=n_words_src,
-                                                    n_words=n_words)
-    #print(f(x_bi, x_bi_mask, y_bi, y_bi_mask, numpy.ones(x_bi_mask.shape[1],dtype=numpy.float32)))
     
-    for jj in xrange(numpy.minimum(5, x.shape[2])):
-        stochastic = True
-        x_current = x[:, :, jj][:, :, None]
-        # remove padding
-        x_current = x_current[:,:x_mask.astype('int64')[:, jj].sum(),:]
+    
+    # load language model's parameters
+    #lm_en.load_params("")
+    print lm_en.params
+    
+    
+    #Soft-landing phrase
+    train_bi_en_fr = NMT.data_iterator.TextIterator(dataset_bi_en, dataset_bi_fr,
+                             [vocal_en], vocal_fr,
+                             n_words_source=n_words_src, n_words_target=n_words,
+                             batch_size=batch_size,
+                             maxlen=maxlen,
+                             skip_empty=True,
+                             shuffle_each_epoch = True,
+                             sort_by_length=sort_by_length,
+                             maxibatch_size=maxibatch_size)
+    train_bi_en_fr = NMT.data_iterator.TextIterator(dataset_bi_fr, dataset_bi_en,
+                             [vocal_en], vocal_fr,
+                             n_words_source=n_words_src, n_words_target=n_words,
+                             batch_size=batch_size,
+                             maxlen=maxlen,
+                             skip_empty=True,
+                             shuffle_each_epoch = True,
+                             sort_by_length=sort_by_length,
+                             maxibatch_size=maxibatch_size)
+    train_mono_en = LM.data_iterator.TextIterator(dataset_mono_en,dict_mono_en)
+    for i in range(max_epochs):
+        for x_bi,y_bi in train_bi:
+            x_bi, x_bi_mask, y_bi, y_bi_mask = prepare_data_bi(x_bi, y_bi, maxlen=maxlen,
+                                                        n_words_src=n_words_src,
+                                                        n_words=n_words)
+        #print(f(x_bi, x_bi_mask, y_bi, y_bi_mask, numpy.ones(x_bi_mask.shape[1],dtype=numpy.float32)))
         
-        #print(x_current)
-        sample, score, sample_word_probs, alignment, hyp_graph = nmt_en_fr.gen_sample(
-                                   x_current,
-                                   k=5,
-                                   maxlen=30,
-                                   stochastic=stochastic,
-                                   argmax=False,
-                                   suppress_unk=False,
-                                   return_hyp_graph=False)
+            for jj in xrange(numpy.minimum(5, x_bi.shape[2])):
+                stochastic = True
+                x_current = x_bi[:, :, jj][:, :, None]
+                # remove padding
+                x_current = x_current[:,:x_bi_mask.astype('int64')[:, jj].sum(),:]
+            
+                #print(x_current)
+                sample, score, sample_word_probs, alignment, hyp_graph = nmt_en_fr.gen_sample(
+                                       x_current,
+                                       k=5,
+                                       maxlen=30,
+                                       stochastic=stochastic,
+                                       argmax=False,
+                                       suppress_unk=False,
+                                       return_hyp_graph=False)
         
-        print 'Source ', jj, ': ',
-        for pos in range(x.shape[1]):
-            if x[0, pos, jj] == 0:
-                break
-            for factor in range(factors):
-                vv = x[factor, pos, jj]
-                if vv in nmt_en_fr.worddicts_r[factor]:
-                    sys.stdout.write(nmt_en_fr.worddicts_r[factor][vv])
-                else:
-                    sys.stdout.write('UNK')
-                if factor+1 < factors:
-                    sys.stdout.write('|')
-                else:
-                    sys.stdout.write(' ')
-        print
-        print 'Truth ', jj, ' : ',
-        for vv in y[:, jj]:
-            if vv == 0:
-                break
-            if vv in nmt_en_fr.worddicts_r[-1]:
-                print nmt_en_fr.worddicts_r[-1][vv],
-            else:
-                print 'UNK',
-        print
-        print 'Sample ', jj, ': ',
-        for ss in sample:
-            for vv in ss:
-                if vv == 0:
-                    break
-                if vv in nmt_en_fr.worddicts_r[-1]:
-                    print nmt_en_fr.worddicts_r[-1][vv],
-                else:
-                    print 'UNK',
-            print "\n"
-      
-        for i in range(5):
-            print(sample_word_probs[i])
-            print(score[i])
-            print(score[i] + numpy.log(sample_word_probs[i]).sum())"""
+        
+        
+        
+        
+       
             
     
     return 0
