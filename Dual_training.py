@@ -26,18 +26,18 @@ import NMT.data_iterator as data_iterator
 import NMT.theano_util as theano_util
 profile = False
 
-dataset_bi_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok"
-dataset_bi_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok"
-dataset_mono_en = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
-dataset_mono_fr = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
-vocal_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok.pkl"
-vocal_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok.pkl"
-test_en = "/people/minhquang/Dual_NMT/data/validation/devel03/devel03.en.tok"
-test_fr = "/people/minhquang/Dual_NMT/data/validation/devel03/devel03.fr.tok"
-path_trans_en_fr = "/people/minhquang/Dual_NMT/models/NMT/model_hal.iter132500.npz"
-path_trans_en_fr = ""
-path_mono_en = ""
-path_mono_fr = ""
+dataset_bi_en = "/home/minhquang/Dual_NMT/data/train/train10/train10.en.tok"
+dataset_bi_fr = "/home/minhquang/Dual_NMT/data/train/train10/train10.fr.tok"
+dataset_mono_en = "/home/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
+dataset_mono_fr = "/home/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
+vocal_en = "/home/minhquang/Dual_NMT/data/train/train10/train10.en.tok.pkl"
+vocal_fr = "/home/minhquang/Dual_NMT/data/train/train10/train10.fr.tok.pkl"
+test_en = "/home/minhquang/Dual_NMT/data/validation/devel03/devel03.en.tok"
+test_fr = "/home/minhquang/Dual_NMT/data/validation/devel03/devel03.fr.tok"
+path_trans_en_fr = "/home/minhquang/Dual_NMT/models/NMT/model_hal.iter132500.npz"
+#path_trans_en_fr = ""
+path_mono_en = "/home/minhquang/Dual_NMT/models/LM/model_lm_en.npz"
+path_mono_fr = "/home/minhquang/Dual_NMT/models/LM/model_lm_fr.npz"
 
 def dual_ascent(lr, tparams, grads, inps, reward, optimizer_params = None):     
     
@@ -138,8 +138,8 @@ def train(dim_word=512,  # word vector dimensionality
               finish_after=10000000,  # finish after this many updates
               dispFreq=1000,
               lrate=0.0001,  # learning rate
-              n_words_src=None,  # source vocabulary size
-              n_words=None,  # target vocabulary size
+              n_words_src=30000,  # source vocabulary size
+              n_words=30000,  # target vocabulary size
               maxlen=100,  # maximum length of the description
               optimizer='adam',
               batch_size=16,
@@ -188,10 +188,8 @@ def train(dim_word=512,  # word vector dimensionality
     model_options_en_fr = model_options_trans.copy()
         
     model_options_fr_en["datasets_bi"] = [dataset_bi_fr,dataset_bi_en]
-    model_options_fr_en["datasets_mono"] = dataset_mono_fr
     model_options_fr_en["dictionaries"] = [vocal_fr,vocal_en]
     
-    model_options_en_fr["datasets_mono"] = dataset_mono_en
     model_options_en_fr["datasets_bi"] = [dataset_bi_en,dataset_bi_fr]
     model_options_en_fr["dictionaries"] = [vocal_en,vocal_fr]
     
@@ -210,7 +208,7 @@ def train(dim_word=512,  # word vector dimensionality
     
     #load params
     
-    nmt_en_fr.load_params(path)
+    nmt_en_fr.load_params(path_trans_en_fr)
     
     # build models
     trng, use_noise, x_bi, x_bi_mask, y_bi, y_bi_mask, opt_ret, cost = nmt_en_fr.build_model()
@@ -227,12 +225,10 @@ def train(dim_word=512,  # word vector dimensionality
     
     grad = T.grad(new_cost,wrt=theano_util.itemlist(tparams)) 
 
-    f = theano.function(inps+[reward],grad)
     #build f_grad_shared: average rexards, f_update: update params by gradient newcost
-    lr = T.scalar('lrate')
-    f_grad_shared_en_fr, f_update_en_fr = dual_ascent(lr, tparams, grad, inps, reward) 
-    
-        
+    lr_en_fr = T.scalar('lrate')
+    f_grad_shared_en_fr, f_update_en_fr = dual_ascent(lr_en_fr, tparams, grad, inps, reward) 
+            
     #build samplers
     nmt_en_fr.build_sampler()
     
@@ -240,14 +236,15 @@ def train(dim_word=512,  # word vector dimensionality
     
     #build language model
     model_options_mono['encoder'] = 'gru'
-    model_options_mono['dim'] = 1000
-    model_options_mono['dim_word'] = 100
-    model_options_mono['n_words'] = 100000
+    model_options_mono['dim'] = 1024
+    model_options_mono['dim_word'] = 512
+    model_options_mono['n_words'] = 30000
+    
     lm_en = lm()
-    lm_fr = lm()
+    #lm_fr = lm()
     
     lm_en.get_options(model_options_mono)
-    lm_fr.get_options(model_options_mono)
+    #lm_fr.get_options(model_options_mono)
     
     lm_en.init_params()
     #lm_fr.init_params()
@@ -255,62 +252,61 @@ def train(dim_word=512,  # word vector dimensionality
     lm_en.init_tparams()
     #lm_fr.init_tparams()
     
-    lm_en.build_model()
-    
+    lm_en.build_model()    
     
     # load language model's parameters
-    #lm_en.load_params("")
-    print lm_en.params
+    lm_en.load_params(path_mono_en)
+    #print lm_en.params
     
     
     #Soft-landing phrase
-    train_bi_en_fr = NMT.data_iterator.TextIterator(dataset_bi_en, dataset_bi_fr,
-                             [vocal_en], vocal_fr,
-                             n_words_source=n_words_src, n_words_target=n_words,
-                             batch_size=batch_size,
-                             maxlen=maxlen,
-                             skip_empty=True,
-                             shuffle_each_epoch = True,
-                             sort_by_length=sort_by_length,
-                             maxibatch_size=maxibatch_size)
-    train_bi_en_fr = NMT.data_iterator.TextIterator(dataset_bi_fr, dataset_bi_en,
-                             [vocal_en], vocal_fr,
-                             n_words_source=n_words_src, n_words_target=n_words,
-                             batch_size=batch_size,
-                             maxlen=maxlen,
-                             skip_empty=True,
-                             shuffle_each_epoch = True,
-                             sort_by_length=sort_by_length,
-                             maxibatch_size=maxibatch_size)
-    train_mono_en = LM.data_iterator.TextIterator(dataset_mono_en,dict_mono_en)
-    for i in range(max_epochs):
-        for x_bi,y_bi in train_bi:
-            x_bi, x_bi_mask, y_bi, y_bi_mask = prepare_data_bi(x_bi, y_bi, maxlen=maxlen,
-                                                        n_words_src=n_words_src,
+    
+    train_en = LM.data_iterator.TextIterator(dataset_mono_en,vocal_en,batch_size= batch_size /2,\
+                                             maxlen = 50, n_words_source = n_words_src)
+    x_en = train_en.next()
+    x_en_s, x_mask_en = prepare_data_mono(x_en, maxlen=maxlen,
                                                         n_words=n_words)
-        #print(f(x_bi, x_bi_mask, y_bi, y_bi_mask, numpy.ones(x_bi_mask.shape[1],dtype=numpy.float32)))
-        
-            for jj in xrange(numpy.minimum(5, x_bi.shape[2])):
+    
+    
+    for i in range(max_epochs):
+        while x_en_s is not None:
+            tmp = []
+            for xs in x_en:
+                tmp.append([xs])
+            s_mid_en = []
+            s_mid_fr = []
+            s_mid_fr_2 = []
+            reward = []
+            for jj in xrange(x_en_s.shape[1]):
                 stochastic = True
-                x_current = x_bi[:, :, jj][:, :, None]
+                x_current = x_en_s[:, jj][None, :, None]
                 # remove padding
-                x_current = x_current[:,:x_bi_mask.astype('int64')[:, jj].sum(),:]
+                x_current = x_current[:,:x_mask_en.astype('int64')[:, jj].sum(),:]
             
                 #print(x_current)
                 sample, score, sample_word_probs, alignment, hyp_graph = nmt_en_fr.gen_sample(
                                        x_current,
-                                       k=5,
-                                       maxlen=30,
+                                       k=10,
+                                       maxlen=50,
                                        stochastic=stochastic,
                                        argmax=False,
                                        suppress_unk=False,
                                        return_hyp_graph=False)
-        
-        
-        
-        
-        
-       
+                
+                for ss in sample:
+                    s_mid_fr.append(ss)
+                    s_mid_fr_2.append(ss)
+                    s_mid_en.append(tmp)
+            
+            s_mid_en, s_mid_en_mask, s_mid_fr,s_mid_fr_mask = prepare_data_bi(s_mid_en, s_mid_fr, maxlen = 50)
+            s_mid_fr_2, s_mid_fr_2_mask = prepare_data_mono(s_mid_fr_2, maxlen = 50)
+            
+            reward = lm_en.f_log_probs(s_mid_fr_2, s_mid_fr_2_mask)
+            print reward
+            x_en = train_en.next()
+            x_en, x_mask_en = prepare_data_mono(x_en, maxlen=maxlen,
+                                                        n_words=n_words)
+            
             
     
     return 0
