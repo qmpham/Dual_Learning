@@ -268,7 +268,7 @@ class lm():
         self.tparams = None
         self.params = None
         self.model_options = None
-        
+        self.f_log_probs = None
     def get_options(self,options):
         self.model_options= options
     
@@ -365,8 +365,7 @@ class lm():
         cost = -tensor.log(probs.flatten()[x_flat_idx])
         cost = cost.reshape([x.shape[0], x.shape[1]])
         opt_ret['cost_per_sample'] = cost
+        inps = [x , x_mask]
         cost = (cost * x_mask).sum(0)
-    
+        self.f_log_probs = theano.function(inps, -cost)
         return trng, use_noise, x, x_mask, opt_ret, cost
-
-    
