@@ -9,31 +9,17 @@ import json
 import numpy
 import copy
 import argparse
-
-import os
-import warnings
+from multiprocessing import Queue, Process
 import sys
-import time
-
-import itertools
-
-from subprocess import Popen
 
 from collections import OrderedDict
-
+from theano.compile.nanguardmode import NanGuardMode
 profile = False
 
-from data_iterator import TextIterator
-from training_progress import TrainingProgress
 import util
 import theano_util 
-import alignment_util
-
 import layers 
-import initializers 
-import optimizers
 from warnings import warn
-
 class dualnmt():
     def __init__(self):
         self.params = None
@@ -128,12 +114,13 @@ class dualnmt():
                                     weight_matrix = not options['tie_decoder_embeddings'])
     
         self.params = params
-        
-        tparams = theano_util.init_theano_params(params)
-        
-        self.tparams = tparams
-        
+        self.tparams = theano_util.init_theano_params(params)
         return params
+    
+    def load_params(self, path):
+    
+        self.params = theano_util.load_params(path, self.params)
+        self.tparams = theano_util.init_theano_params( self.params)
     
     def build_encoder(self, tparams, options, trng, use_noise, x_mask=None, sampling=False):
 
@@ -155,23 +142,14 @@ class dualnmt():
             retain_probability_hidden = 1-options['dropout_hidden']
             retain_probability_source = 1-options['dropout_source']
             if sampling:
-                if options['model_version'] < 0.1:
-                    rec_dropout = theano.shared(numpy.array([retain_probability_hidden]*2, dtype='float32'))
-                    rec_dropout_r = theano.shared(numpy.array([retain_probability_hidden]*2, dtype='float32'))
-                    emb_dropout = theano.shared(numpy.array([retain_probability_emb]*2, dtype='float32'))
-                    emb_dropout_r = theano.shared(numpy.array([retain_probability_emb]*2, dtype='float32'))
-                    source_dropout = theano.shared(numpy.float32(retain_probability_source))
-                else:
-                    rec_dropout = theano.shared(numpy.array([1.]*2, dtype='float32'))
-                    rec_dropout_r = theano.shared(numpy.array([1.]*2, dtype='float32'))
-                    emb_dropout = theano.shared(numpy.array([1.]*2, dtype='float32'))
-                    emb_dropout_r = theano.shared(numpy.array([1.]*2, dtype='float32'))
-                    source_dropout = theano.shared(numpy.float32(1.))
+            
+                rec_dropout = theano.shared(numpy.array([1.]*2, dtype='float32'))
+                rec_dropout_r = theano.shared(numpy.array([1.]*2, dtype='float32'))
+                emb_dropout = theano.shared(numpy.array([1.]*2, dtype='float32'))
+                emb_dropout_r = theano.shared(numpy.array([1.]*2, dtype='float32'))
+                source_dropout = theano.shared(numpy.float32(1.))
             else:
-                if options['model_version'] < 0.1:
-                    scaled = False
-                else:
-                    scaled = True
+                scaled = True
                 rec_dropout = layers.shared_dropout_layer((2, n_samples, options['dim']), use_noise, trng, retain_probability_hidden, scaled)
                 rec_dropout_r = layers.shared_dropout_layer((2, n_samples, options['dim']), use_noise, trng, retain_probability_hidden, scaled)
                 emb_dropout = layers.shared_dropout_layer((2, n_samples, options['dim_word']), use_noise, trng, retain_probability_emb, scaled)
@@ -217,9 +195,7 @@ class dualnmt():
     
         # context will be the concatenation of forward and backward rnns
         ctx = theano_util.concatenate([proj[0], projr[0][::-1]], axis=proj[0].ndim-1)
-        
-        #self.ctx = ctx
-        
+                
         return x, ctx
     
     def build_model(self):
@@ -245,10 +221,7 @@ class dualnmt():
             retain_probability_emb = 1-options['dropout_embedding']
             retain_probability_hidden = 1-options['dropout_hidden']
             retain_probability_target = 1-options['dropout_target']
-            if options['model_version'] < 0.1:
-                scaled = False
-            else:
-                scaled = True
+            scaled = True
             rec_dropout_d = layers.shared_dropout_layer((5, n_samples, options['dim']), use_noise, trng, retain_probability_hidden, scaled)
             emb_dropout_d = layers.shared_dropout_layer((2, n_samples, options['dim_word']), use_noise, trng, retain_probability_emb, scaled)
             ctx_dropout_d = layers.shared_dropout_layer((4, n_samples, 2*options['dim']), use_noise, trng, retain_probability_hidden, scaled)
@@ -337,15 +310,9 @@ class dualnmt():
         cost = -tensor.log(probs.flatten()[y_flat_idx])
         cost = cost.reshape([y.shape[0], y.shape[1]])
         cost = (cost * y_mask).sum(0)
-        self.cost = cost
-        self.x = x
-        self.x_mask = x_mask
-        self.y = y
-        self.y_mask = y_mask
         inps = [x, x_mask, y, y_mask]
-        self.f_log_probs = theano.function(inps,cost)
-        
-        return trng, use_noise, x, x_mask, y, y_mask, opt_ret, cost
+        self.f_log_probs = theano.function(inps, -cost)
+        return x, x_mask, y, y_mask, opt_ret, cost
     
     def build_sampler(self, return_alignment=False):
         tparams = self.tparams
@@ -353,30 +320,18 @@ class dualnmt():
         trng = self.trng
         use_noise = self.use_noise
         
-        if options['use_dropout'] and options['model_version'] < 0.1:
-            retain_probability_emb = 1-options['dropout_embedding']
-            retain_probability_hidden = 1-options['dropout_hidden']
-            retain_probability_source = 1-options['dropout_source']
-            retain_probability_target = 1-options['dropout_target']
-            rec_dropout_d = theano.shared(numpy.array([retain_probability_hidden]*5, dtype='float32'))
-            emb_dropout_d = theano.shared(numpy.array([retain_probability_emb]*2, dtype='float32'))
-            ctx_dropout_d = theano.shared(numpy.array([retain_probability_hidden]*4, dtype='float32'))
-            target_dropout = theano.shared(numpy.float32(retain_probability_target))
-        else:
-            rec_dropout_d = theano.shared(numpy.array([1.]*5, dtype='float32'))
-            emb_dropout_d = theano.shared(numpy.array([1.]*2, dtype='float32'))
-            ctx_dropout_d = theano.shared(numpy.array([1.]*4, dtype='float32'))
+    
+        rec_dropout_d = theano.shared(numpy.array([1.]*5, dtype='float32'))
+        emb_dropout_d = theano.shared(numpy.array([1.]*2, dtype='float32'))
+        ctx_dropout_d = theano.shared(numpy.array([1.]*4, dtype='float32'))
     
         x, ctx = self.build_encoder(tparams, options, trng, use_noise, x_mask=None, sampling=True)
-        n_samples = x.shape[2]
     
         # get the input for decoder rnn initializer mlp
         ctx_mean = ctx.mean(0)
         # ctx_mean = concatenate([proj[0][-1],projr[0][-1]], axis=proj[0].ndim-2)
     
-        if options['use_dropout'] and options['model_version'] < 0.1:
-            ctx_mean *= retain_probability_hidden
-    
+       
         init_state = layers.get_layer_constr('ff')(tparams, ctx_mean, options,
                                         prefix='ff_state', activ='tanh')
     
@@ -392,8 +347,7 @@ class dualnmt():
         # if it's the first word, emb should be all zero and it is indicated by -1
         decoder_embedding_suffix = '' if options['tie_encoder_decoder_embeddings'] else '_dec'
         emb = layers.get_layer_constr('embedding')(tparams, y, suffix=decoder_embedding_suffix)
-        if options['use_dropout'] and options['model_version'] < 0.1:
-            emb = emb * target_dropout
+        
         emb = tensor.switch(y[:, None] < 0,
                             tensor.zeros((1, options['dim_word'])),
                             emb)
@@ -419,12 +373,8 @@ class dualnmt():
         # alignment matrix (attention model)
         dec_alphas = proj[2]
     
-        if options['use_dropout'] and options['model_version'] < 0.1:
-            next_state_up = next_state * retain_probability_hidden
-            emb *= retain_probability_emb
-            ctxs *= retain_probability_hidden
-        else:
-            next_state_up = next_state
+    
+        next_state_up = next_state
     
         logit_lstm = layers.get_layer_constr('ff')(tparams, next_state_up, options,
                                         prefix='ff_logit_lstm', activ='linear')
@@ -433,10 +383,7 @@ class dualnmt():
         logit_ctx = layers.get_layer_constr('ff')(tparams, ctxs, options,
                                        prefix='ff_logit_ctx', activ='linear')
         logit = tensor.tanh(logit_lstm+logit_prev+logit_ctx)
-    
-        if options['use_dropout'] and options['model_version'] < 0.1:
-            logit *= retain_probability_hidden
-    
+
         logit_W = tparams['Wemb' + decoder_embedding_suffix].T if options['tie_decoder_embeddings'] else None
         logit = layers.get_layer_constr('ff')(tparams, logit, options,
                                 prefix='ff_logit', activ='linear', W=logit_W)
@@ -673,19 +620,25 @@ class dualnmt():
             alignment = [None for i in range(len(sample))]
     
         return sample, sample_score, sample_word_probs, alignment, hyp_graph
-
-    
+    def gen_sample_multprc(self, queue, rqueue, trng=None, k=1, maxlen=30,
+               stochastic=True, argmax=False, return_alignment=False, suppress_unk=False,
+               return_hyp_graph=False):
         
-
-
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+        while True:
+            sample = queue.get()
+            if sample is None:
+                break
+            idx, s = sample[0], sample[1]
+            
+            sample, score, sample_word_probs, alignment, hyp_graph = self.gen_sample(s,
+                                           k=k,
+                                           maxlen=maxlen,
+                                           stochastic=stochastic,
+                                           argmax=argmax,
+                                           suppress_unk=suppress_unk,
+                                           return_hyp_graph=return_hyp_graph)
+            
+            for ss in sample:
+                rqueue.put((idx,ss))
+                
+        return
