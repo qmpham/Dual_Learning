@@ -1,6 +1,7 @@
 import LM
-from LM.duallm import lm
-from nematus import nmt,theano_util,data_iterator,util,optimizers
+from LM import lm
+
+from nematus import nmt,theano_util,data_iterator,util,optimizers, training_progress
 import theano
 import theano.tensor as T
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
@@ -23,8 +24,10 @@ from collections import OrderedDict
 
 profile = False
 
-dataset_bi_en = "/people/minhquang/nematus-master/data/train/train10/train10.en.tok.shuf"
-dataset_bi_fr = "/people/minhquang/nematus-master/data/train/train10/train10.fr.tok.shuf"
+valid_en = "/people/minhquang/Dual_NMT/data/validation/hit/hit.en.tok.shuf.dev.tok"
+valid_fr = "/people/minhquang/Dual_NMT/data/validation/hit/hit.fr.tok.shuf.dev.tok"
+dataset_bi_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok.shuf"
+dataset_bi_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok.shuf"
 dataset_mono_en = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
 dataset_mono_fr = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
 vocal_en = "/people/minhquang/Dual_NMT/data/train/train10/concatenated.en.tok.pkl"
@@ -37,21 +40,22 @@ path_mono_en = "/people/minhquang/Dual_NMT/models/LM/model_lm_en.npz"
 path_mono_fr = "/people/minhquang/Dual_NMT/models/LM/model_lm_fr.npz"
 
 
-def dual_second_ascent(lr, alpha, tparams_1, tparams_2, grads_1, grads_2, inps_1, inps_2, reward, avg_reward, source, target):     
+def dual_second_ascent(lr1, lr2, alpha, tparams_1, tparams_2, grads_1,\
+                       grads_2, inps_1, inps_2, reward, avg_reward, source, target):     
     
     g_shared_1 = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_%s_forward_grad_second_shared' % (k, source, target)) \
                 for k,p in tparams_1.iteritems() ]
     g_shared_2 = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_%s_backward_grad_second_shared' % (k, target, source)) \
                 for k,p in tparams_2.iteritems() ]
     g_up_1 = [(g1, g2) for g1,g2 in zip(g_shared_1,grads_1)]
-    g_up_2 = [(g1, g2) for g1,g2 in zip(g_shared_2,grads_2)]
+    g_up_2 = [(g1, -g2) for g1,g2 in zip(g_shared_2,grads_2)]
     
     f_grad_second_shared = theano.function(inps_1 + inps_2 + [reward], avg_reward, updates = g_up_1 + g_up_2, on_unused_input='ignore')
     
-    params_up_1 = [(p , p + lr * g) for p,g in zip(theano_util.itemlist(tparams_1), g_shared_1)]
-    params_up_2 = [(p , p + lr * (1-alpha) * g) for p,g in zip(theano_util.itemlist(tparams_2), g_shared_2)]
+    params_up_1 = [(p , p + lr1 * g) for p,g in zip(theano_util.itemlist(tparams_1), g_shared_1)]
+    params_up_2 = [(p , p + lr2 * (1-alpha) * g) for p,g in zip(theano_util.itemlist(tparams_2), g_shared_2)]
     
-    f_second_update = theano.function([lr], [], updates = params_up_1 + params_up_2, on_unused_input='ignore')
+    f_second_update = theano.function([lr1,lr2], [], updates = params_up_1 + params_up_2, on_unused_input='ignore')
     
     return f_grad_second_shared, f_second_update
 
@@ -59,6 +63,7 @@ def dual_ascent(lr, tparams, grads, inps, reward, avg_reward, direction):
     
     g_shared = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_forward_grad_shared' % (k,direction)) \
                 for k,p in tparams.iteritems() ]
+    
     g_up = [(g1, g2) for g1,g2 in zip(g_shared,grads)]
         
     f_grad_shared = theano.function(inps + [reward], avg_reward, updates = g_up, on_unused_input='ignore')
@@ -68,76 +73,72 @@ def dual_ascent(lr, tparams, grads, inps, reward, avg_reward, direction):
     f_update = theano.function([lr], [], updates = params_up, on_unused_input='ignore')
     
     return f_grad_shared, f_update
-# batch preparation, returns padded batch and mask
-def prepare_data_mono(seqs_x, maxlen=None, n_words=14000):
-    # x: a list of sentences
-    lengths_x = [len(s) for s in seqs_x]
 
-    # filter according to mexlen
-    if maxlen is not None:
-        new_seqs_x = []
-        new_lengths_x = []
-        for l_x, s_x in zip(lengths_x, seqs_x):
-            if l_x < maxlen:
-                new_seqs_x.append(s_x)
-                new_lengths_x.append(l_x)
-        lengths_x = new_lengths_x
-        seqs_x = new_seqs_x
+def adadelta_dual_ascent(lr, tparams, grads, inps, reward, avg_reward, direction):
+    g_shared = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_forward_grad_shared' % (k,direction)) \
+                for k,p in tparams.iteritems() ]
+    
+    g_squared = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_forward_grad_squared' % (k,direction)) \
+                for k,p in tparams.iteritems() ]
+    
+    x_squared = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_forward_delta_squared' % (k,direction)) \
+                for k,p in tparams.iteritems() ]
+       
+    g_up = [(g1, g2) for g1,g2 in zip(g_shared,grads)]
+    g_acc_up = [(g1, 0.95 * g1 + 0.05 * (g2 ** 2)) for g1,g2 in zip(g_squared,g_shared)]
+    
+    f_grad_shared = theano.function(inps + [reward], avg_reward, updates = g_up + g_acc_up, on_unused_input='ignore')
 
-        if len(lengths_x) < 1:
-            return None, None, None, None
+    updir = [(T.sqrt(delta_x_s + 1e-6) / T.sqrt(g_s + 1e-6) * g) \
+             for delta_x_s,g_s,g in zip(x_squared,g_squared,g_shared)]
+    
+    delta_x_acc_up = [(delta_x1, 0.95 * delta_x1 + 0.05 * (delta_x ** 2)) \
+                      for delta_x1,delta_x in zip(x_squared, updir)]        
+    
+    params_up = [(p , p + lr * g) for p,g in zip(theano_util.itemlist(tparams), updir)]
+    
+    f_update = theano.function([lr], [], updates = delta_x_acc_up + params_up, on_unused_input='ignore')
+    
+    return f_grad_shared, f_update
 
-    n_samples = len(seqs_x)
-    maxlen_x = numpy.max(lengths_x) + 1
+def adadelta_second_dual_ascent(lr1, lr2, alpha, tparams_1, tparams_2, grads_1,\
+                         grads_2, inps_1, inps_2, reward, avg_reward, source, target):
+    g_shared_1 = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_%s_forward_grad_second_shared' % (k, source, target)) \
+                for k,p in tparams_1.iteritems() ]
+    g_squared_1 = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_%s_forward_grad_second_squared' % (k, source, target)) \
+                for k,p in tparams_1.iteritems() ]
+    x_squared_1 = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_%s_forward_delta_second_squared' % (k, source, target)) \
+                for k,p in tparams_1.iteritems() ]
+    
+    g_shared_2 = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_%s_backward_grad_second_shared' % (k, target, source)) \
+                for k,p in tparams_2.iteritems() ]
+    g_squared_2 = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_%s_backward_grad_second_squared' % (k, target, source)) \
+                for k,p in tparams_2.iteritems() ]
+    x_squared_2 = [ theano.shared(p.get_value()*numpy.float32(0.),name= '%s_%s_%s_backward_delta_second_squared' % (k, target, source)) \
+                for k,p in tparams_2.iteritems() ] 
+    
+    g_up_1 = [(g1, g2) for g1,g2 in zip(g_shared_1,grads_1)]
+    g_up_2 = [(g1, -g2) for g1,g2 in zip(g_shared_2,grads_2)]
+    g_acc_up_1 = [(g1, 0.95 * g1 + 0.05 * (g2 ** 2)) for g1,g2 in zip(g_squared_1,g_shared_1)]
+    g_acc_up_2 = [(g1, 0.95 * g1 + 0.05 * (g2 ** 2)) for g1,g2 in zip(g_squared_2,g_shared_2)]
 
-    x = numpy.zeros((maxlen_x, n_samples)).astype('int64')
-    x_mask = numpy.zeros((maxlen_x, n_samples)).astype('float32')
-    for idx, s_x in enumerate(seqs_x):
-        x[:lengths_x[idx], idx] = s_x
-        x_mask[:lengths_x[idx]+1, idx] = 1.
-    return x, x_mask
-
-def prepare_data_bi(seqs_x, seqs_y, maxlen=None, n_words_src=14000,
-                 n_words=14000):
-    # x: a list of sentences
-    lengths_x = [len(s) for s in seqs_x]
-    lengths_y = [len(s) for s in seqs_y]
-
-    if maxlen is not None:
-        new_seqs_x = []
-        new_seqs_y = []
-        new_lengths_x = []
-        new_lengths_y = []
-        for l_x, s_x, l_y, s_y in zip(lengths_x, seqs_x, lengths_y, seqs_y):
-            if l_x < maxlen and l_y < maxlen:
-                new_seqs_x.append(s_x)
-                new_lengths_x.append(l_x)
-                new_seqs_y.append(s_y)
-                new_lengths_y.append(l_y)
-        lengths_x = new_lengths_x
-        seqs_x = new_seqs_x
-        lengths_y = new_lengths_y
-        seqs_y = new_seqs_y
-
-        if len(lengths_x) < 1 or len(lengths_y) < 1:
-            return None, None, None, None
-
-    n_samples = len(seqs_x)
-    n_factors = len(seqs_x[0][0])
-    maxlen_x = numpy.max(lengths_x) + 1
-    maxlen_y = numpy.max(lengths_y) + 1
-
-    x = numpy.zeros((n_factors, maxlen_x, n_samples)).astype('int64')
-    y = numpy.zeros((maxlen_y, n_samples)).astype('int64')
-    x_mask = numpy.zeros((maxlen_x, n_samples)).astype('float32')
-    y_mask = numpy.zeros((maxlen_y, n_samples)).astype('float32')
-    for idx, [s_x, s_y] in enumerate(zip(seqs_x, seqs_y)):
-        x[:, :lengths_x[idx], idx] = zip(*s_x)
-        x_mask[:lengths_x[idx]+1, idx] = 1.
-        y[:lengths_y[idx], idx] = s_y
-        y_mask[:lengths_y[idx]+1, idx] = 1.
-
-    return x, x_mask, y, y_mask
+    f_grad_second_shared = theano.function(inps_1 + inps_2 + [reward], avg_reward, updates = g_up_1 + g_up_2 + g_acc_up_1 + g_acc_up_2, on_unused_input='ignore')
+    
+    updir_1 = [(T.sqrt(delta_x_s + 1e-6) / T.sqrt(g_s + 1e-6) * g) \
+             for delta_x_s,g_s,g in zip(x_squared_1,g_squared_1,g_shared_1)]
+    updir_2 = [(T.sqrt(delta_x_s + 1e-6) / T.sqrt(g_s + 1e-6) * g) \
+             for delta_x_s,g_s,g in zip(x_squared_2,g_squared_2,g_shared_2)] 
+    delta_x_acc_up_1 = [(delta_x1, 0.95 * delta_x1 + 0.05 * (delta_x ** 2)) \
+                      for delta_x1,delta_x in zip(x_squared_1, updir_1)]  
+    delta_x_acc_up_2 = [(delta_x1, 0.95 * delta_x1 + 0.05 * (delta_x ** 2)) \
+                      for delta_x1,delta_x in zip(x_squared_2, updir_2)]  
+    
+    params_up_1 = [(p , p + lr1 * g) for p,g in zip(theano_util.itemlist(tparams_1), g_shared_1)]
+    params_up_2 = [(p , p + lr2 * (1-alpha) * g) for p,g in zip(theano_util.itemlist(tparams_2), g_shared_2)]
+    
+    f_second_update = theano.function([lr1,lr2], [], updates = params_up_1 + params_up_2 + delta_x_acc_up_1 + delta_x_acc_up_2 , on_unused_input='ignore')
+    
+    return f_grad_second_shared, f_second_update
 
 N = 14000
 
@@ -147,17 +148,19 @@ def train(dim_word=512,  # word vector dimensionality
               dim_per_factor=None, # list of word vector dimensionalities (one per factor): [250,200,50] for total dimensionality of 500
               encoder='gru',
               decoder='gru_cond',
-              lrate=0.0001,  # learning rate
+              lrate_fw=0.0001,  # learning rate
+              lrate_bw=0.001,
               lrate_bi = 0.0001,
               n_words_src= N,  # source vocabulary size
               n_words= N ,  # target vocabulary size
+              optimizers_= "adadelta",
               maxlen=30,  # maximum length of the description
-              dispFreq = 200,
+              dispFreq = 100,
               validFreq = 2000,
               batch_size=30,
               valid_batch_size=60,
               save = True,
-              saveto='models/model_dual_3.npz',
+              saveto='models/dual2/model_dual.npz',
               use_dropout=False,
               use_second_update = True,
               dropout_embedding=0.2, # dropout for input embeddings (0: no dropout)
@@ -171,18 +174,15 @@ def train(dim_word=512,  # word vector dimensionality
               decoder_truncate_gradient=-1, # Truncate BPTT gradients in the decoder to this value. Use -1 for no truncation
               alpha = 0.005,
               clip_c = 1.,
-              external_validation_script_en_fr = "",
-              external_validation_script_fr_en = ""
+              external_validation_script_en_fr = None,
+              external_validation_script_fr_en = None
         ):
-    #hyperparameters:
-    alp = theano.shared(numpy.float32(alpha),name="alpha")
-    # Translation Model:
-        
+           
     # Model options
     u = time.time()
     model_options_trans = OrderedDict(sorted(locals().copy().items()))
     model_options_mono = OrderedDict()
-    
+
     if model_options_trans['dim_per_factor'] == None:
         if factors == 1:
             model_options_trans['dim_per_factor'] = [model_options_trans['dim_word']]
@@ -195,15 +195,34 @@ def train(dim_word=512,  # word vector dimensionality
     
     model_options_fr_en = model_options_trans.copy()
     model_options_en_fr = model_options_trans.copy()
-        
+    
     model_options_fr_en["datasets_bi"] = [dataset_bi_fr,dataset_bi_en]
     model_options_fr_en["dictionaries"] = [vocal_fr,vocal_en]
     
     model_options_en_fr["datasets_bi"] = [dataset_bi_en,dataset_bi_fr]
-    model_options_en_fr["dictionaries"] = [vocal_en,vocal_fr]
+    model_options_en_fr["dictionaries"] = [vocal_en,vocal_fr]  
+    json.dump(dict(model_options_en_fr),open('%s.model_options_en_fr.npz.json'%saveto,'wb'),indent=2)
+    json.dump(dict(model_options_fr_en),open('%s.model_options_fr_en.npz.json'%saveto,'wb'),indent=2)
+        
+    #training progression file:
+    training_progress_en_fr = training_progress.TrainingProgress()
+    training_progress_en_fr.uidx = 0
+    training_progress_en_fr.eidx = 0
+    training_progress_en_fr.estop = False
+    training_progress_en_fr.history_errs = []
+    training_progress_file_en_fr = saveto + '.en_fr.progress.json'
     
+    training_progress_fr_en = training_progress.TrainingProgress()
+    training_progress_fr_en.uidx = 0
+    training_progress_fr_en.eidx = 0
+    training_progress_fr_en.estop = False
+    training_progress_fr_en.history_errs = []
+    training_progress_file_fr_en = saveto + '.fr_en.progress.json'
+
+    #hyperparameters:
+    alp = theano.shared(numpy.float32(alpha),name="alpha")
     
-    
+    # Translation Model:
     #load dictionary
     #English:
     worddict_en = util.load_dict(vocal_en)
@@ -312,25 +331,41 @@ def train(dim_word=512,  # word vector dimensionality
         grad_fr_en = new_grads
         
         #build f_grad_shared: average rewards, f_update: update params by gradient newcost
-    lr_en_fr = T.scalar('lrate_en_fr')
-    lr_fr_en = T.scalar('lrate_fr_en')
+    lr_forward = T.scalar('lrate_forward')
+    lr_backward = T.scalar('lrate_backward')
     lr1 = T.scalar('lrate1')
     lr2 = T.scalar('lrate2')
-    
-    f_dual_grad_shared_en_fr, f_dual_update_en_fr = dual_ascent(lr_en_fr, tparams_en_fr, grad_en_fr, \
+    if optimizers is not None:
+        f_dual_grad_shared_en_fr, f_dual_update_en_fr = eval("%s_dual_ascent"%optimizers_)(lr_forward, tparams_en_fr, grad_en_fr, \
                                                                 inps_en_fr, reward_en_fr, avg_reward_en_fr, "en_fr" ) 
-    f_dual_grad_shared_fr_en, f_dual_update_fr_en = dual_ascent(lr_fr_en, tparams_fr_en, grad_fr_en, \
+        f_dual_grad_shared_fr_en, f_dual_update_fr_en = eval("%s_dual_ascent"%optimizers_)(lr_forward, tparams_fr_en, grad_fr_en, \
                                                                 inps_fr_en, reward_fr_en, avg_reward_fr_en, "fr_en") 
+    else:    
+        f_dual_grad_shared_en_fr, f_dual_update_en_fr = dual_ascent(lr_forward, tparams_en_fr, grad_en_fr, \
+                                                                    inps_en_fr, reward_en_fr, avg_reward_en_fr, "en_fr" ) 
+        f_dual_grad_shared_fr_en, f_dual_update_fr_en = dual_ascent(lr_forward, tparams_fr_en, grad_fr_en, \
+                                                                    inps_fr_en, reward_fr_en, avg_reward_fr_en, "fr_en") 
     
     if use_second_update:
-        f_dual_grad_shared_en_fr, f_dual_update_en_fr = dual_second_ascent(lr_en_fr, alp, tparams_en_fr,\
+        if optimizers is not None:
+            f_dual_grad_shared_en_fr, f_dual_update_en_fr = eval("%s_second_dual_ascent"%optimizers_)(lr_forward, lr_backward, alp, tparams_en_fr,\
                                                                                          tparams_fr_en, grad_en_fr,\
                                                                                          grad_ce_fr_en, inps_en_fr, inps_fr_en,\
                                                                                          reward_en_fr, avg_reward_en_fr, "en", "fr")
-        f_dual_grad_shared_fr_en, f_dual_update_fr_en = dual_second_ascent(lr_fr_en, alp, tparams_fr_en,\
+            f_dual_grad_shared_fr_en, f_dual_update_fr_en = eval("%s_second_dual_ascent"%optimizers_)(lr_forward, lr_backward, alp, tparams_fr_en,\
                                                                                          tparams_en_fr, grad_fr_en,\
                                                                                          grad_ce_en_fr, inps_fr_en, inps_en_fr,\
                                                                                          reward_fr_en, avg_reward_fr_en, "fr", "en") 
+        
+        else:
+            f_dual_grad_shared_en_fr, f_dual_update_en_fr = dual_second_ascent(lr_forward, lr_backward, alp, tparams_en_fr,\
+                                                                                             tparams_fr_en, grad_en_fr,\
+                                                                                             grad_ce_fr_en, inps_en_fr, inps_fr_en,\
+                                                                                             reward_en_fr, avg_reward_en_fr, "en", "fr")
+            f_dual_grad_shared_fr_en, f_dual_update_fr_en = dual_second_ascent(lr_forward, lr_backward, alp, tparams_fr_en,\
+                                                                                             tparams_en_fr, grad_fr_en,\
+                                                                                             grad_ce_en_fr, inps_fr_en, inps_en_fr,\
+                                                                                             reward_fr_en, avg_reward_fr_en, "fr", "en") 
         
     f_grad_shared_en_fr, f_update_en_fr, _ = optimizers.adadelta(lr1, tparams_en_fr, grad_ce_en_fr, inps_en_fr, cost_ce_en_fr)
     f_grad_shared_fr_en, f_update_fr_en, _ = optimizers.adadelta(lr2, tparams_fr_en, grad_ce_fr_en, inps_fr_en, cost_ce_fr_en)
@@ -344,24 +379,27 @@ def train(dim_word=512,  # word vector dimensionality
     model_options_mono['dim_word'] = 512
     model_options_mono['n_words'] = N
     print "Build language models ...",
-    lm_en = lm()
-    lm_fr = lm()
+    params_en = lm.init_params(model_options_mono)
+    params_fr = lm.init_params(model_options_mono)
+    json.dump(dict(model_options_mono),open("%s.model_options_mono.npz.json"%saveto,"wb"))
+
+    # reload parameters
+    if reload_ and os.path.exists(path_mono_en):
+        params_en = lm.load_params(path_mono_en, params_en)
+    tparams_en = lm.init_tparams(params_en)
+    if reload_ and os.path.exists(path_mono_fr):
+        params_fr = lm.load_params(path_mono_fr, params_fr)
+    tparams_fr = lm.init_tparams(params_fr)
     
-    lm_en.get_options(model_options_mono)
-    lm_fr.get_options(model_options_mono)
-    
-    lm_en.init_params()
-    lm_fr.init_params()
-    
-    lm_en.init_tparams()
-    lm_fr.init_tparams()
-    
-    lm_en.build_model()    
-    lm_fr.build_model()
-    
-    # load language model's parameters
-    lm_en.load_params(path_mono_en)
-    lm_fr.load_params(path_mono_fr)
+
+    # build the symbolic computational graph
+    trng_en, use_noise_en, x_en, x_mask_en, opt_ret_en, cost_en = lm.build_model(tparams_en, model_options_mono)
+    inps_en = [x_en, x_mask_en]
+    trng_fr, use_noise_fr, x_fr, x_mask_fr, opt_ret_fr, cost_fr = lm.build_model(tparams_fr, model_options_mono)
+    inps_fr = [x_fr, x_mask_fr]
+    f_log_probs_en = theano.function(inps_en, cost_en, profile=profile)
+    f_log_probs_fr = theano.function(inps_fr, cost_fr, profile=profile)
+
     print "Done"
     print "Compilation time:", time.time()-u
     #print lm_en.params
@@ -369,7 +407,6 @@ def train(dim_word=512,  # word vector dimensionality
     
     #Soft-landing phrase   
     
-    uidx = 0
     max_epochs = 500
     c_fb_batches_en_fr = 0
     c_d_batches_en_fr = 0
@@ -383,40 +420,60 @@ def train(dim_word=512,  # word vector dimensionality
     ud_start = time.time()
     p_validation_en_fr = None
     p_validation_fr_en = None
-    for i in range(max_epochs):
+    
+    # validation sets:
+    valid_en_fr = data_iterator.TextIterator(valid_en, valid_fr,\
+                     [vocal_en], vocal_fr,\
+                     batch_size=batch_size * 2,\
+                     maxlen=30,\
+                     n_words_source=n_words_src,\
+                     n_words_target=n_words)
+    valid_fr_en = data_iterator.TextIterator(valid_fr, valid_en,\
+                     [vocal_fr], vocal_en,\
+                     batch_size=batch_size * 2,\
+                     maxlen=30,\
+                     n_words_source=n_words_src,\
+                     n_words_target=n_words)
+    
+    for training_progress_en_fr.eidx in xrange(training_progress_en_fr.eidx, max_epochs):  
+        training_progress_fr_en.eidx = training_progress_en_fr.eidx
+        
         train_en = LM.data_iterator.TextIterator(dataset_mono_en, vocal_en, batch_size = batch_size /2,\
-                                                 maxlen = 30, n_words_source = n_words_src)
+                                                 maxlen = 30, \
+                                                 n_words_source = n_words_src)
         train_fr = LM.data_iterator.TextIterator(dataset_mono_fr, vocal_fr, batch_size = batch_size /2,\
-                                                 maxlen = 30, n_words_source = n_words_src)
+                                                 maxlen = 30, \
+                                                 n_words_source = n_words_src)
         train_en_fr = data_iterator.TextIterator(dataset_bi_en, dataset_bi_fr,\
                      [vocal_en], vocal_fr,\
                      batch_size=batch_size /2,\
                      maxlen=30,\
-                     n_words_source=14000,\
-                     n_words_target=14000)
+                     n_words_source=n_words_src,\
+                     n_words_target=n_words, shuffle_each_epoch = True)
         train_fr_en = data_iterator.TextIterator(dataset_bi_fr, dataset_bi_en,\
                      [vocal_fr], vocal_en,\
                      batch_size=batch_size /2,\
                      maxlen=30,\
-                     n_words_source=14000,\
-                     n_words_target=14000)
+                     n_words_source=n_words_src,\
+                     n_words_target=n_words, shuffle_each_epoch = True)
                  
         x_en = train_en.next()
-        x_en_s, x_mask_en = prepare_data_mono(x_en, maxlen=maxlen,
+        x_en_s, x_mask_en = lm.prepare_data(x_en, maxlen=maxlen,
                                                             n_words=n_words)
         x_fr = train_fr.next()
-        x_fr_s, x_mask_fr = prepare_data_mono(x_fr, maxlen=maxlen,
+        x_fr_s, x_mask_fr = lm.prepare_data(x_fr, maxlen=maxlen,
                                                             n_words=n_words)
         
         x_en_en_fr, x_fr_en_fr = train_en_fr.next()
-        x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = prepare_data_bi(x_en_en_fr, x_fr_en_fr,maxlen=maxlen,
+        x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = nmt.prepare_data(x_en_en_fr, x_fr_en_fr,maxlen=maxlen,
                                                             n_words=n_words)
         x_fr_fr_en, x_en_fr_en = train_fr_en.next()
-        x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = prepare_data_bi(x_fr_fr_en, x_en_fr_en,maxlen=maxlen,
+        x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = nmt.prepare_data(x_fr_fr_en, x_en_fr_en,maxlen=maxlen,
                                                             n_words=n_words)
         while x_en_s is not None or x_fr_s is not None:
-            uidx += 1 
-             
+            training_progress_en_fr.uidx += 1
+            training_progress_fr_en.uidx += 1
+       
         #Dual update
             # play game en->fr:
             
@@ -425,7 +482,6 @@ def train(dim_word=512,  # word vector dimensionality
                 s_source_en = []
                 s_mid_fr = []
                 s_mid_fr_2 = []
-                reward = []
                 u1 = time.time()
                 for jj in xrange(x_en_s.shape[1]):
                     stochastic = True
@@ -451,12 +507,12 @@ def train(dim_word=512,  # word vector dimensionality
                         s_source_en.append(tmp)
                 #print "time sampling one batch:", time.time() - u1
                 u1 = time.time()
-                s_source_en, s_source_en_mask, s_mid_fr, s_mid_fr_mask = prepare_data_bi(s_source_en, s_mid_fr)
-                s_mid_fr_2, s_mid_fr_2_mask = prepare_data_mono(s_mid_fr_2)
+                s_source_en, s_source_en_mask, s_mid_fr, s_mid_fr_mask = nmt.prepare_data(s_source_en, s_mid_fr)
+                s_mid_fr_2, s_mid_fr_2_mask = lm.prepare_data(s_mid_fr_2)
                 #print "time for prepare data: ", time.time() - u1
                 #Time for dual ascent update: average over batch then over samples
                 u1 = time.time()
-                reward_en_fr = lm_fr.f_log_probs(s_mid_fr_2, s_mid_fr_2_mask) * alpha\
+                reward_en_fr = f_log_probs_fr(s_mid_fr_2, s_mid_fr_2_mask) * alpha\
                                                 + f_log_probs_fr_en(numpy.reshape(s_mid_fr,(1,s_mid_fr.shape[0],s_mid_fr.shape[1])), \
                                                  s_mid_fr_mask, \
                                                  numpy.reshape(s_source_en,(s_source_en.shape[1],s_source_en.shape[2])),\
@@ -469,10 +525,10 @@ def train(dim_word=512,  # word vector dimensionality
                                                  s_mid_fr_mask, \
                                                  numpy.reshape(s_source_en,(s_source_en.shape[1],s_source_en.shape[2])),\
                                                  s_source_en_mask, reward_en_fr)
-                    f_dual_update_en_fr(lrate)
+                    f_dual_update_en_fr(lrate_fw,lrate_bw)
                 else:
                     cost_en_fr = f_dual_grad_shared_en_fr(s_source_en, s_source_en_mask, s_mid_fr, s_mid_fr_mask, reward_en_fr)
-                    f_dual_update_en_fr(lrate)
+                    f_dual_update_en_fr(lrate_fw,lrate_bw)
                 cost_acc_en_fr += cost_en_fr
                 #print "time to dual update :", time.time()-u1
                     
@@ -485,7 +541,6 @@ def train(dim_word=512,  # word vector dimensionality
                 s_source_fr = []
                 s_mid_en = []
                 s_mid_en_2 = []
-                reward = []
                 u1 = time.time()
 
                 for jj in xrange(x_fr_s.shape[1]):
@@ -510,12 +565,12 @@ def train(dim_word=512,  # word vector dimensionality
                         s_mid_en.append(ss)
                         s_mid_en_2.append(ss)
                         s_source_fr.append(tmp)
-                s_source_fr, s_source_fr_mask, s_mid_en, s_mid_en_mask = prepare_data_bi(s_source_fr, s_mid_en)
-                s_mid_en_2, s_mid_en_2_mask = prepare_data_mono(s_mid_en_2)
+                s_source_fr, s_source_fr_mask, s_mid_en, s_mid_en_mask = nmt.prepare_data(s_source_fr, s_mid_en)
+                s_mid_en_2, s_mid_en_2_mask = lm.prepare_data(s_mid_en_2)
                 #print "time sampling one batch:", time.time() - u1
                 u1 = time.time()                                                                
                 #Time for dual ascent update: average over batch then over samples
-                reward_fr_en = lm_en.f_log_probs(s_mid_en_2, s_mid_en_2_mask) * alpha\
+                reward_fr_en = f_log_probs_en(s_mid_en_2, s_mid_en_2_mask) * alpha\
                                                 + f_log_probs_en_fr(numpy.reshape(s_mid_en,(1,s_mid_en.shape[0],s_mid_en.shape[1])), \
                                                  s_mid_en_mask, \
                                                  numpy.reshape(s_source_fr,(s_source_fr.shape[1],s_source_fr.shape[2])),\
@@ -528,13 +583,13 @@ def train(dim_word=512,  # word vector dimensionality
                                                  s_mid_en_mask, \
                                                  numpy.reshape(s_source_fr,(s_source_fr.shape[1],s_source_fr.shape[2])),\
                                                  s_source_fr_mask, reward_fr_en)
-                    f_dual_update_fr_en(lrate)
+                    f_dual_update_fr_en(lrate_fw,lrate_bw)
                 else:
                     cost_fr_en = f_dual_grad_shared_fr_en(s_source_fr, s_source_fr_mask, s_mid_en, s_mid_en_mask, reward_fr_en)
-                    f_dual_update_fr_en(lrate)
+                    f_dual_update_fr_en(lrate_fw,lrate_bw)
                 cost_acc_fr_en += cost_fr_en
                 #print "time to dual update :", time.time()-u1                    
-                if numpy.isnan(cost_en_fr):
+                if numpy.isnan(cost_fr_en):
                     ipdb.set_trace()
                     
         #Standard-using bilingual setence pair update 
@@ -556,34 +611,47 @@ def train(dim_word=512,  # word vector dimensionality
             #print "time to standard update :", time.time()-u1
                                                         
         #print
-            if numpy.mod(uidx,dispFreq) ==0:
+            if numpy.mod(training_progress_en_fr.uidx,dispFreq) ==0:
                 ud = time.time()-ud_start
                 ud_start = time.time()
                 cost_avg_en_fr = cost_acc_en_fr / float(c_fb_batches_en_fr)
                 cost_avg_fr_en = cost_acc_fr_en / float(c_fb_batches_fr_en)
                 cost_ce_avg_en_fr = cost_ce_acc_en_fr / float(c_d_batches_fr_en)
                 cost_ce_avg_fr_en = cost_ce_acc_fr_en / float(c_d_batches_en_fr)
-                print 'epoch:', i , 'Update: ', uidx,\
+                print 'epoch:', training_progress_en_fr.eidx , 'Update: ', training_progress_en_fr.uidx,\
                 "cost_en_fr: %f cost_fr_en: %f" % (cost_avg_en_fr, cost_avg_fr_en),\
                 "cost_ce_en_fr: %f cost_ce_fr_en: %f" % (cost_ce_avg_en_fr, cost_ce_avg_fr_en),\
                 'UD: ', ud
                 if save:
                     saveto_uidx = '{}.iter{}.en_fr.npz'.format(
-                            os.path.splitext(saveto)[0], uidx)
+                            os.path.splitext(saveto)[0], training_progress_en_fr.uidx)
     
                     both_params = dict(theano_util.unzip_from_theano(tparams_en_fr))
                     numpy.savez(saveto_uidx, **both_params)
                     
                     saveto_uidx = '{}.iter{}.fr_en.npz'.format(
-                            os.path.splitext(saveto)[0], uidx)
+                            os.path.splitext(saveto)[0], training_progress_fr_en.uidx)
     
                     both_params = dict(theano_util.unzip_from_theano(tparams_fr_en))
-                    numpy.savez(saveto_uidx, **both_params)
-                    
-                    
-            """
-            if numpy.mod(uidx, validFreq):
-                if external_validation_script_en_fr:
+                    numpy.savez(saveto_uidx, **both_params)                 
+        # test on validation data:
+            if numpy.mod(training_progress_en_fr.uidx, validFreq) == 0:
+                use_noise_en_fr.set_value(0.)
+                valid_errs_en_fr, alignment = nmt.pred_probs(f_log_probs_en_fr, nmt.prepare_data,
+                                        model_options_en_fr, valid_en_fr, verbose=False)
+                valid_err_en_fr = valid_errs_en_fr.mean()
+                training_progress_en_fr.history_errs.append(float(valid_err_en_fr))
+                
+                valid_errs_fr_en, alignment = nmt.pred_probs(f_log_probs_fr_en, nmt.prepare_data,
+                                        model_options_fr_en, valid_fr_en, verbose=False)
+                valid_err_fr_en = valid_errs_fr_en.mean()
+                training_progress_fr_en.history_errs.append(float(valid_err_fr_en))
+                
+                print 'Valid en_fr: ', valid_err_en_fr
+                print 'Valid_fr_en: ', valid_err_fr_en
+                training_progress_en_fr.save_to_json(training_progress_file_en_fr)
+                training_progress_fr_en.save_to_json(training_progress_file_fr_en)
+                if external_validation_script_en_fr is not None:
                     print "Calling external validation script"
                     if p_validation_en_fr is not None and p_validation_en_fr.poll() is None:
                         print "Waiting for previous validation run to finish"
@@ -598,7 +666,7 @@ def train(dim_word=512,  # word vector dimensionality
                     print 'Done'
                     p_validation_en_fr = Popen([external_validation_script_en_fr])
 
-                if external_validation_script_fr_en:
+                if external_validation_script_fr_en is not None:
                     print "Calling external validation script"
                     if p_validation_fr_en is not None and p_validation_fr_en.poll() is None:
                         print "Waiting for previous validation run to finish"
@@ -612,25 +680,42 @@ def train(dim_word=512,  # word vector dimensionality
                     numpy.savez(saveto +'.fr_en.dev', **both_params)
                     print 'Done'
                     p_validation_fr_en = Popen([external_validation_script_fr_en])
-            """
-            
+           
             #load for next batch:   
-                    
-            x_en = train_en.next()
-            x_en_s, x_mask_en = prepare_data_mono(x_en, maxlen=maxlen,
-                                                        n_words=n_words)
-            x_fr = train_fr.next()
-            x_fr_s, x_mask_fr = prepare_data_mono(x_fr, maxlen=maxlen,
-                                                        n_words=n_words)
-                                                        
-            x_en_en_fr, x_fr_en_fr = train_en_fr.next()
-            x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = prepare_data_bi(x_en_en_fr, x_fr_en_fr,maxlen=maxlen,
-                                                        n_words=n_words)
-            x_fr_fr_en, x_en_fr_en = train_fr_en.next()
-            x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = prepare_data_bi(x_fr_fr_en, x_en_fr_en,maxlen=maxlen,
-                                                        n_words=n_words)
+            try:      
+                x_en = train_en.next()
+                x_en_s, x_mask_en = lm.prepare_data(x_en, maxlen=maxlen,
+                                                            n_words=n_words)
+            except StopIteration:
+                break
             
-    
+            try: 
+                x_fr = train_fr.next()
+                x_fr_s, x_mask_fr = lm.prepare_data(x_fr, maxlen=maxlen,
+                                                            n_words=n_words)
+            except StopIteration:
+                break
+            
+            try:
+                x_en_en_fr, x_fr_en_fr = train_en_fr.next()
+                x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = nmt.prepare_data(x_en_en_fr, x_fr_en_fr,maxlen=maxlen,
+                                                            n_words=n_words)
+            except StopIteration:
+                train_en_fr.reset()
+                x_en_en_fr, x_fr_en_fr = train_en_fr.next()
+                x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = nmt.prepare_data(x_en_en_fr, x_fr_en_fr,maxlen=maxlen,
+                                                            n_words=n_words)
+                
+            try:
+                x_fr_fr_en, x_en_fr_en = train_fr_en.next()
+                x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = nmt.prepare_data(x_fr_fr_en, x_en_fr_en,maxlen=maxlen,
+                                                            n_words=n_words)
+            except StopIteration:
+                train_fr_en.reset()
+                x_fr_fr_en, x_en_fr_en = train_fr_en.next()
+                x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = nmt.prepare_data(x_fr_fr_en, x_en_fr_en,maxlen=maxlen,
+                                                            n_words=n_words)
+            
     return 0
 
 train()
