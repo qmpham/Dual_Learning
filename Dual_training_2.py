@@ -1,3 +1,5 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
 import LM
 from LM import lm
 
@@ -23,22 +25,6 @@ from subprocess import Popen
 from collections import OrderedDict
 
 profile = False
-
-valid_en = "/people/minhquang/Dual_NMT/data/validation/hit/hit.en.tok.shuf.dev.tok"
-valid_fr = "/people/minhquang/Dual_NMT/data/validation/hit/hit.fr.tok.shuf.dev.tok"
-dataset_bi_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok.shuf"
-dataset_bi_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok.shuf"
-dataset_mono_en = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
-dataset_mono_fr = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok"
-vocal_en = "/people/minhquang/Dual_NMT/data/train/train10/concatenated.en.tok.pkl"
-vocal_fr = "/people/minhquang/Dual_NMT/data/train/train10/concatenated.fr.tok.pkl"
-test_en = "/people/minhquang/Dual_NMT/data/validation/hit/hit.en.tok.shuf.dev.tok"
-test_fr = "/people/minhquang/Dual_NMT/data/validation/hit/hit.fr.tok.shuf.dev.tok"
-path_trans_en_fr = "/people/minhquang/Dual_NMT/models/NMT/model_en_fr.npz.npz.best_bleu"
-path_trans_fr_en = "/people/minhquang/Dual_NMT/models/NMT/model_fr_en.npz.npz.best_bleu"
-path_mono_en = "/people/minhquang/Dual_NMT/models/LM/model_lm_en.npz"
-path_mono_fr = "/people/minhquang/Dual_NMT/models/LM/model_lm_fr.npz"
-
 
 def dual_second_ascent(lr1, lr2, alpha, tparams_1, tparams_2, grads_1,\
                        grads_2, inps_1, inps_2, reward, avg_reward, source, target):     
@@ -95,7 +81,7 @@ def adadelta_dual_ascent(lr, tparams, grads, inps, reward, avg_reward, direction
     delta_x_acc_up = [(delta_x1, 0.95 * delta_x1 + 0.05 * (delta_x ** 2)) \
                       for delta_x1,delta_x in zip(x_squared, updir)]        
     
-    params_up = [(p , p + lr * g) for p,g in zip(theano_util.itemlist(tparams), updir)]
+    params_up = [(p , p + g) for p,g in zip(theano_util.itemlist(tparams), updir)]
     
     f_update = theano.function([lr], [], updates = delta_x_acc_up + params_up, on_unused_input='ignore')
     
@@ -126,15 +112,17 @@ def adadelta_second_dual_ascent(lr1, lr2, alpha, tparams_1, tparams_2, grads_1,\
     
     updir_1 = [(T.sqrt(delta_x_s + 1e-6) / T.sqrt(g_s + 1e-6) * g) \
              for delta_x_s,g_s,g in zip(x_squared_1,g_squared_1,g_shared_1)]
+    
     updir_2 = [(T.sqrt(delta_x_s + 1e-6) / T.sqrt(g_s + 1e-6) * g) \
              for delta_x_s,g_s,g in zip(x_squared_2,g_squared_2,g_shared_2)] 
+    
     delta_x_acc_up_1 = [(delta_x1, 0.95 * delta_x1 + 0.05 * (delta_x ** 2)) \
                       for delta_x1,delta_x in zip(x_squared_1, updir_1)]  
     delta_x_acc_up_2 = [(delta_x1, 0.95 * delta_x1 + 0.05 * (delta_x ** 2)) \
                       for delta_x1,delta_x in zip(x_squared_2, updir_2)]  
     
-    params_up_1 = [(p , p + lr1 * g) for p,g in zip(theano_util.itemlist(tparams_1), g_shared_1)]
-    params_up_2 = [(p , p + lr2 * (1-alpha) * g) for p,g in zip(theano_util.itemlist(tparams_2), g_shared_2)]
+    params_up_1 = [(p , p + g) for p,g in zip(theano_util.itemlist(tparams_1), updir_1)]
+    params_up_2 = [(p , p + (1-alpha) * g) for p,g in zip(theano_util.itemlist(tparams_2), updir_2)]
     
     f_second_update = theano.function([lr1,lr2], [], updates = params_up_1 + params_up_2 + delta_x_acc_up_1 + delta_x_acc_up_2 , on_unused_input='ignore')
     
@@ -148,19 +136,22 @@ def train(dim_word=512,  # word vector dimensionality
               dim_per_factor=None, # list of word vector dimensionalities (one per factor): [250,200,50] for total dimensionality of 500
               encoder='gru',
               decoder='gru_cond',
-              lrate_fw=0.0001,  # learning rate
-              lrate_bw=0.001,
+              lrate_fw= 0.0001,  # learning rate
+              lrate_bw= 0.001,
               lrate_bi = 0.0001,
-              n_words_src= N,  # source vocabulary size
-              n_words= N ,  # target vocabulary size
-              optimizers_= "adadelta",
+              print_gradient = True,
+              n_words_en= 14000,  # english vocabulary size
+              n_words_fr= 14000 ,  # french vocabulary size
+              optimizers_= None,
               maxlen=30,  # maximum length of the description
+              disp_grad_Freq = 400,
               dispFreq = 100,
+              saveFreq = 400,
               validFreq = 2000,
-              batch_size=30,
+              batch_size= 30,
               valid_batch_size=60,
               save = True,
-              saveto='models/dual2/model_dual.npz',
+              saveto = 'models/dual2/model_dual.npz',
               use_dropout=False,
               use_second_update = True,
               dropout_embedding=0.2, # dropout for input embeddings (0: no dropout)
@@ -168,20 +159,38 @@ def train(dim_word=512,  # word vector dimensionality
               dropout_source=0, # dropout source words (0: no dropout)
               dropout_target=0, # dropout target words (0: no dropout)
               reload_=True,
-              tie_encoder_decoder_embeddings=False, # Tie the input embeddings of the encoder and the decoder (first factor only)
-              tie_decoder_embeddings=False, # Tie the input embeddings of the decoder with the softmax output embeddings
+              tie_encoder_decoder_embeddings = False, # Tie the input embeddings of the encoder and the decoder (first factor only)
+              tie_decoder_embeddings = False, # Tie the input embeddings of the decoder with the softmax output embeddings
               encoder_truncate_gradient=-1, # Truncate BPTT gradients in the encoder to this value. Use -1 for no truncation
               decoder_truncate_gradient=-1, # Truncate BPTT gradients in the decoder to this value. Use -1 for no truncation
               alpha = 0.005,
+              reward_scale = 1.0,
               clip_c = 1.,
               external_validation_script_en_fr = None,
-              external_validation_script_fr_en = None
+              external_validation_script_fr_en = None,
+              beam_search_size = 2,
+              valid_en = "/people/minhquang/Dual_NMT/data/validation/hit/hit.en.tok.shuf.dev.tok",
+              valid_fr = "/people/minhquang/Dual_NMT/data/validation/hit/hit.fr.tok.shuf.dev.tok",
+              dataset_bi_en = "/people/minhquang/Dual_NMT/data/train/train10/train10.en.tok",
+              dataset_bi_fr = "/people/minhquang/Dual_NMT/data/train/train10/train10.fr.tok",
+              dataset_mono_en = "/people/minhquang/Dual_NMT/data/train/hit/hit.en.tok.shuf.train.tok",
+              dataset_mono_fr = "/people/minhquang/Dual_NMT/data/train/hit/hit.fr.tok.shuf.train.tok",
+              vocab_en = "/people/minhquang/Dual_NMT/data/vocabulaires/2/concatenated.en.tok.pkl",
+              vocab_fr = "/people/minhquang/Dual_NMT/data/vocabulaires/2/concatenated.fr.tok.pkl",
+              test_en = "/people/minhquang/Dual_NMT/data/validation/hit/hit.en.tok.shuf.dev.tok",
+              test_fr = "/people/minhquang/Dual_NMT/data/validation/hit/hit.fr.tok.shuf.dev.tok",
+              path_trans_en_fr = "/people/minhquang/Dual_NMT/models/NMT/model_en_fr.npz.npz.best_bleu",
+              path_trans_fr_en = "/people/minhquang/Dual_NMT/models/NMT/model_fr_en.npz.npz.best_bleu",
+              path_mono_en = "/people/minhquang/Dual_NMT/models/LM/model_lm_en.npz",
+              path_mono_fr = "/people/minhquang/Dual_NMT/models/LM/model_lm_fr.npz"
         ):
            
     # Model options
     u = time.time()
     model_options_trans = OrderedDict(sorted(locals().copy().items()))
-    model_options_mono = OrderedDict()
+    model_options_en = OrderedDict()
+    model_options_fr = OrderedDict()
+    
 
     if model_options_trans['dim_per_factor'] == None:
         if factors == 1:
@@ -197,10 +206,15 @@ def train(dim_word=512,  # word vector dimensionality
     model_options_en_fr = model_options_trans.copy()
     
     model_options_fr_en["datasets_bi"] = [dataset_bi_fr,dataset_bi_en]
-    model_options_fr_en["dictionaries"] = [vocal_fr,vocal_en]
-    
+    model_options_fr_en["dictionaries"] = [vocab_fr,vocab_en]
+    model_options_fr_en["n_words_src"] = n_words_fr
+    model_options_fr_en["n_words"] = n_words_en
+                       
     model_options_en_fr["datasets_bi"] = [dataset_bi_en,dataset_bi_fr]
-    model_options_en_fr["dictionaries"] = [vocal_en,vocal_fr]  
+    model_options_en_fr["dictionaries"] = [vocab_en,vocab_fr]  
+    model_options_en_fr["n_words_src"] = n_words_en
+    model_options_en_fr["n_words"] = n_words_fr
+    print "saveto: ", saveto
     json.dump(dict(model_options_en_fr),open('%s.model_options_en_fr.npz.json'%saveto,'wb'),indent=2)
     json.dump(dict(model_options_fr_en),open('%s.model_options_fr_en.npz.json'%saveto,'wb'),indent=2)
         
@@ -208,14 +222,12 @@ def train(dim_word=512,  # word vector dimensionality
     training_progress_en_fr = training_progress.TrainingProgress()
     training_progress_en_fr.uidx = 0
     training_progress_en_fr.eidx = 0
-    training_progress_en_fr.estop = False
     training_progress_en_fr.history_errs = []
     training_progress_file_en_fr = saveto + '.en_fr.progress.json'
     
     training_progress_fr_en = training_progress.TrainingProgress()
     training_progress_fr_en.uidx = 0
     training_progress_fr_en.eidx = 0
-    training_progress_fr_en.estop = False
     training_progress_fr_en.history_errs = []
     training_progress_file_fr_en = saveto + '.fr_en.progress.json'
 
@@ -224,13 +236,13 @@ def train(dim_word=512,  # word vector dimensionality
     
     # Translation Model:
     #load dictionary
-    #English:
-    worddict_en = util.load_dict(vocal_en)
+        #English:
+    worddict_en = util.load_dict(vocab_en)
     worddict_en_r = dict()
     for kk,vv in worddict_en.iteritems():
         worddict_en[vv]=kk
-    #French:
-    worddict_fr = util.load_dict(vocal_fr)
+        #French:
+    worddict_fr = util.load_dict(vocab_fr)
     worddict_fr_r = dict()
     for kk,vv in worddict_fr.iteritems():
         worddict_fr[vv]=kk
@@ -249,9 +261,7 @@ def train(dim_word=512,  # word vector dimensionality
         params_fr_en = theano_util.load_params(path_trans_fr_en, params_fr_en)
     tparams_en_fr = theano_util.init_theano_params(params_en_fr)
     tparams_fr_en = theano_util.init_theano_params(params_fr_en)
-    
-    
-    
+
     # build models
     print "build nmt models ... ",
     trng_en_fr, use_noise_en_fr, x_en, \
@@ -262,15 +272,13 @@ def train(dim_word=512,  # word vector dimensionality
     
     inps_en_fr = [x_en, x_en_mask, y_fr, y_fr_mask]
     inps_fr_en = [x_fr, x_fr_mask, y_en, y_en_mask]
-    print "Done \n"
-    
+    print "Done \n"   
     
     #build samplers
     print "Build samplers ...",
     f_init_en_fr, f_next_en_fr = nmt.build_sampler(tparams_en_fr, model_options_en_fr, use_noise_en_fr, trng_en_fr)
     f_init_fr_en, f_next_fr_en = nmt.build_sampler(tparams_fr_en, model_options_fr_en, use_noise_fr_en, trng_fr_en)
     print "Done\n"
-    
     
     #build g_log_probs
     f_log_probs_en_fr = theano.function(inps_en_fr, -cost_en_fr)
@@ -291,51 +299,68 @@ def train(dim_word=512,  # word vector dimensionality
         # -cost = log(p(s_mid|s))
     new_cost_en_fr = T.mean(reward_en_fr * (- cost_en_fr))
     new_cost_fr_en = T.mean(reward_fr_en * (- cost_fr_en))
-    
+        # cross entropy
     cost_ce_en_fr = cost_en_fr.mean()
-    cost_ce_fr_en = cost_fr_en.mean()
-    
-    
-        # gradient newcost = gradient( reward * -cost) = avg reward_i * gradient( -cost_i) = avg reward_i * gradient(log p(s_mid | s)) stochastic approximation of policy gradient
+    cost_ce_fr_en = cost_fr_en.mean()    
+
+        # gradient newcost = gradient( avg reward * -cost) = avg reward_i * gradient( -cost_i) = avg reward_i * gradient(log p(s_mid | s)) stochastic approximation of policy gradient
     grad_en_fr = T.grad(new_cost_en_fr, wrt=theano_util.itemlist(tparams_en_fr)) 
     grad_fr_en = T.grad(new_cost_fr_en, wrt=theano_util.itemlist(tparams_fr_en)) 
     
     grad_ce_en_fr = T.grad(cost_ce_en_fr, wrt=theano_util.itemlist(tparams_en_fr))
     grad_ce_fr_en = T.grad(cost_ce_fr_en, wrt=theano_util.itemlist(tparams_fr_en))
     
-    g_en_fr = theano.function(inps_en_fr + [reward_en_fr], grad_en_fr,\
-                              mode=NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True))
-    g_fr_en = theano.function(inps_fr_en + [reward_fr_en], grad_fr_en,\
-                              mode=NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True))
+    # apply gradient clipping here
+    if clip_c > 0.:
+        g1 = 0.
+        for g in grad_en_fr:
+            g1 += (g**2).sum()
+        new_grads_1 = []
+        for g in grad_en_fr:
+            new_grads_1.append(T.switch(g1 > (clip_c**2),
+                            g / T.sqrt(g1) * clip_c, g))
+        grad_en_fr = new_grads_1
+        
+        g2 = 0.
+        for g in grad_fr_en:
+            g2 += (g**2).sum()
+        new_grads_2 = []
+        for g in grad_fr_en:
+            new_grads_2.append(T.switch(g2 > (clip_c**2),
+                            g / T.sqrt(g2) * clip_c, g))
+        grad_fr_en = new_grads_2
+        
+        g3 = 0.
+        for g in grad_ce_en_fr:
+            g3 += (g**2).sum()
+        new_grads_3 = []
+        for g in grad_ce_en_fr:
+            new_grads_3.append(T.switch(g3 > (clip_c**2),
+                            g / T.sqrt(g3) * clip_c, g))
+        grad_ce_en_fr = new_grads_3
+        
+        g4 = 0.
+        for g in grad_ce_fr_en:
+            g4 += (g**2).sum()
+        new_grads_4 = []
+        for g in grad_ce_fr_en:
+            new_grads_4.append(T.switch(g4 > (clip_c**2),
+                            g / T.sqrt(g4) * clip_c, g))
+        grad_ce_fr_en = new_grads_4
+    
+    #function to get value of gradients
+    g_en_fr = theano.function(inps_en_fr + [reward_en_fr], grad_en_fr)
+    g_fr_en = theano.function(inps_fr_en + [reward_fr_en], grad_fr_en)
     
     g_ce_en_fr = theano.function(inps_en_fr, grad_ce_en_fr)
     g_ce_fr_en = theano.function(inps_fr_en, grad_ce_fr_en)
     
-    # apply gradient clipping here
-    if clip_c > 0.:
-        g2 = 0.
-        for g in grad_en_fr:
-            g2 += (g**2).sum()
-        new_grads = []
-        for g in grad_en_fr:
-            new_grads.append(T.switch(g2 > (clip_c**2),
-                            g / T.sqrt(g2) * clip_c, g))
-        grad_en_fr = new_grads
-        g2 = 0.
-        for g in grad_fr_en:
-            g2 += (g**2).sum()
-        new_grads = []
-        for g in grad_fr_en:
-            new_grads.append(T.switch(g2 > (clip_c**2),
-                            g / T.sqrt(g2) * clip_c, g))
-        grad_fr_en = new_grads
-        
         #build f_grad_shared: average rewards, f_update: update params by gradient newcost
     lr_forward = T.scalar('lrate_forward')
     lr_backward = T.scalar('lrate_backward')
     lr1 = T.scalar('lrate1')
     lr2 = T.scalar('lrate2')
-    if optimizers is not None:
+    if optimizers_ is not None:
         f_dual_grad_shared_en_fr, f_dual_update_en_fr = eval("%s_dual_ascent"%optimizers_)(lr_forward, tparams_en_fr, grad_en_fr, \
                                                                 inps_en_fr, reward_en_fr, avg_reward_en_fr, "en_fr" ) 
         f_dual_grad_shared_fr_en, f_dual_update_fr_en = eval("%s_dual_ascent"%optimizers_)(lr_forward, tparams_fr_en, grad_fr_en, \
@@ -347,12 +372,14 @@ def train(dim_word=512,  # word vector dimensionality
                                                                     inps_fr_en, reward_fr_en, avg_reward_fr_en, "fr_en") 
     
     if use_second_update:
-        if optimizers is not None:
-            f_dual_grad_shared_en_fr, f_dual_update_en_fr = eval("%s_second_dual_ascent"%optimizers_)(lr_forward, lr_backward, alp, tparams_en_fr,\
+        if optimizers_ is not None:
+            f_dual_grad_shared_en_fr, f_dual_update_en_fr = eval("%s_second_dual_ascent"%optimizers_)(lr_forward, lr_backward,\
+                                                                                         alp, tparams_en_fr,\
                                                                                          tparams_fr_en, grad_en_fr,\
                                                                                          grad_ce_fr_en, inps_en_fr, inps_fr_en,\
                                                                                          reward_en_fr, avg_reward_en_fr, "en", "fr")
-            f_dual_grad_shared_fr_en, f_dual_update_fr_en = eval("%s_second_dual_ascent"%optimizers_)(lr_forward, lr_backward, alp, tparams_fr_en,\
+            f_dual_grad_shared_fr_en, f_dual_update_fr_en = eval("%s_second_dual_ascent"%optimizers_)(lr_forward, lr_backward,\
+                                                                                         alp, tparams_fr_en,\
                                                                                          tparams_en_fr, grad_fr_en,\
                                                                                          grad_ce_en_fr, inps_fr_en, inps_en_fr,\
                                                                                          reward_fr_en, avg_reward_fr_en, "fr", "en") 
@@ -374,14 +401,23 @@ def train(dim_word=512,  # word vector dimensionality
     
     
     #build language model
-    model_options_mono['encoder'] = 'gru'
-    model_options_mono['dim'] = 1024
-    model_options_mono['dim_word'] = 512
-    model_options_mono['n_words'] = N
+    model_options_en['encoder'] = 'gru'
+    model_options_en['dim'] = 1024
+    model_options_en['dim_word'] = 512
+    model_options_en['n_words'] = n_words_en
+    model_options_en['dataset'] = dataset_mono_en
+    
+    model_options_fr['encoder'] = 'gru'
+    model_options_fr['dim'] = 1024
+    model_options_fr['dim_word'] = 512
+    model_options_fr['n_words'] = n_words_fr
+    model_options_fr['dataset'] = dataset_mono_fr
+
     print "Build language models ...",
-    params_en = lm.init_params(model_options_mono)
-    params_fr = lm.init_params(model_options_mono)
-    json.dump(dict(model_options_mono),open("%s.model_options_mono.npz.json"%saveto,"wb"))
+    params_en = lm.init_params(model_options_en)
+    params_fr = lm.init_params(model_options_fr)
+    json.dump(dict(model_options_en),open("%s.model_options_en.npz.json"%saveto,"wb"))
+    json.dump(dict(model_options_fr),open("%s.model_options_fr.npz.json"%saveto,"wb"))
 
     # reload parameters
     if reload_ and os.path.exists(path_mono_en):
@@ -393,9 +429,9 @@ def train(dim_word=512,  # word vector dimensionality
     
 
     # build the symbolic computational graph
-    trng_en, use_noise_en, x_en, x_mask_en, opt_ret_en, cost_en = lm.build_model(tparams_en, model_options_mono)
+    trng_en, use_noise_en, x_en, x_mask_en, opt_ret_en, cost_en = lm.build_model(tparams_en, model_options_en)
     inps_en = [x_en, x_mask_en]
-    trng_fr, use_noise_fr, x_fr, x_mask_fr, opt_ret_fr, cost_fr = lm.build_model(tparams_fr, model_options_mono)
+    trng_fr, use_noise_fr, x_fr, x_mask_fr, opt_ret_fr, cost_fr = lm.build_model(tparams_fr, model_options_fr)
     inps_fr = [x_fr, x_mask_fr]
     f_log_probs_en = theano.function(inps_en, cost_en, profile=profile)
     f_log_probs_fr = theano.function(inps_fr, cost_fr, profile=profile)
@@ -423,53 +459,53 @@ def train(dim_word=512,  # word vector dimensionality
     
     # validation sets:
     valid_en_fr = data_iterator.TextIterator(valid_en, valid_fr,\
-                     [vocal_en], vocal_fr,\
+                     [vocab_en], vocab_fr,\
                      batch_size=batch_size * 2,\
-                     maxlen=30,\
-                     n_words_source=n_words_src,\
-                     n_words_target=n_words)
+                     maxlen=maxlen,\
+                     n_words_source=n_words_en,\
+                     n_words_target=n_words_fr)
     valid_fr_en = data_iterator.TextIterator(valid_fr, valid_en,\
-                     [vocal_fr], vocal_en,\
+                     [vocab_fr], vocab_en,\
                      batch_size=batch_size * 2,\
-                     maxlen=30,\
-                     n_words_source=n_words_src,\
-                     n_words_target=n_words)
+                     maxlen=maxlen,\
+                     n_words_source=n_words_fr,\
+                     n_words_target=n_words_en)
     
     for training_progress_en_fr.eidx in xrange(training_progress_en_fr.eidx, max_epochs):  
         training_progress_fr_en.eidx = training_progress_en_fr.eidx
         
-        train_en = LM.data_iterator.TextIterator(dataset_mono_en, vocal_en, batch_size = batch_size /2,\
-                                                 maxlen = 30, \
-                                                 n_words_source = n_words_src)
-        train_fr = LM.data_iterator.TextIterator(dataset_mono_fr, vocal_fr, batch_size = batch_size /2,\
-                                                 maxlen = 30, \
-                                                 n_words_source = n_words_src)
+        train_en = LM.data_iterator.TextIterator(dataset_mono_en, vocab_en, batch_size = batch_size /2,\
+                                                 maxlen = maxlen, \
+                                                 n_words_source = n_words_en)
+        train_fr = LM.data_iterator.TextIterator(dataset_mono_fr, vocab_fr, batch_size = batch_size /2,\
+                                                 maxlen = maxlen, \
+                                                 n_words_source = n_words_fr)
         train_en_fr = data_iterator.TextIterator(dataset_bi_en, dataset_bi_fr,\
-                     [vocal_en], vocal_fr,\
+                     [vocab_en], vocab_fr,\
                      batch_size=batch_size /2,\
-                     maxlen=30,\
-                     n_words_source=n_words_src,\
-                     n_words_target=n_words, shuffle_each_epoch = True)
+                     maxlen=maxlen,\
+                     n_words_source=n_words_en,\
+                     n_words_target=n_words_fr, shuffle_each_epoch = True)
         train_fr_en = data_iterator.TextIterator(dataset_bi_fr, dataset_bi_en,\
-                     [vocal_fr], vocal_en,\
+                     [vocab_fr], vocab_en,\
                      batch_size=batch_size /2,\
-                     maxlen=30,\
-                     n_words_source=n_words_src,\
-                     n_words_target=n_words, shuffle_each_epoch = True)
+                     maxlen=maxlen,\
+                     n_words_source=n_words_fr,\
+                     n_words_target=n_words_en, shuffle_each_epoch = True)
                  
         x_en = train_en.next()
         x_en_s, x_mask_en = lm.prepare_data(x_en, maxlen=maxlen,
-                                                            n_words=n_words)
+                                                            n_words=n_words_en)
         x_fr = train_fr.next()
         x_fr_s, x_mask_fr = lm.prepare_data(x_fr, maxlen=maxlen,
-                                                            n_words=n_words)
+                                                            n_words=n_words_fr)
         
         x_en_en_fr, x_fr_en_fr = train_en_fr.next()
         x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = nmt.prepare_data(x_en_en_fr, x_fr_en_fr,maxlen=maxlen,
-                                                            n_words=n_words)
+                                                            n_words=n_words_en)
         x_fr_fr_en, x_en_fr_en = train_fr_en.next()
         x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = nmt.prepare_data(x_fr_fr_en, x_en_fr_en,maxlen=maxlen,
-                                                            n_words=n_words)
+                                                            n_words=n_words_fr)
         while x_en_s is not None or x_fr_s is not None:
             training_progress_en_fr.uidx += 1
             training_progress_fr_en.uidx += 1
@@ -492,8 +528,8 @@ def train(dim_word=512,  # word vector dimensionality
                     sample, score, sample_word_probs, alignment, hyp_graph = nmt.gen_sample([f_init_en_fr],\
                                            [f_next_en_fr],
                                            x_current,
-                                           k=2,
-                                           maxlen=40,
+                                           k=beam_search_size,
+                                           maxlen=maxlen,
                                            stochastic=stochastic,
                                            argmax=False,
                                            suppress_unk=False,
@@ -512,26 +548,35 @@ def train(dim_word=512,  # word vector dimensionality
                 #print "time for prepare data: ", time.time() - u1
                 #Time for dual ascent update: average over batch then over samples
                 u1 = time.time()
-                reward_en_fr = f_log_probs_fr(s_mid_fr_2, s_mid_fr_2_mask) * alpha\
-                                                + f_log_probs_fr_en(numpy.reshape(s_mid_fr,(1,s_mid_fr.shape[0],s_mid_fr.shape[1])), \
+                reward_en_fr = (f_log_probs_fr(s_mid_fr_2, s_mid_fr_2_mask) * alpha \
+                               + f_log_probs_fr_en(numpy.reshape(s_mid_fr,(1,s_mid_fr.shape[0],s_mid_fr.shape[1])), \
                                                  s_mid_fr_mask, \
                                                  numpy.reshape(s_source_en,(s_source_en.shape[1],s_source_en.shape[2])),\
-                                                 s_source_en_mask) * (1-alpha)
+                                                 s_source_en_mask) * (1-alpha)) * reward_scale
                 #print "time to calculate reward: ", time.time()-u1
                 u1 = time.time()
                 if use_second_update:
-                    cost_en_fr = f_dual_grad_shared_fr_en(s_source_en, s_source_en_mask, s_mid_fr, s_mid_fr_mask,\
+                    cost_en_fr = f_dual_grad_shared_en_fr(s_source_en, s_source_en_mask, s_mid_fr, s_mid_fr_mask,\
                                                           numpy.reshape(s_mid_fr,(1,s_mid_fr.shape[0],s_mid_fr.shape[1])), \
-                                                 s_mid_fr_mask, \
-                                                 numpy.reshape(s_source_en,(s_source_en.shape[1],s_source_en.shape[2])),\
-                                                 s_source_en_mask, reward_en_fr)
+                                                          s_mid_fr_mask, \
+                                                          numpy.reshape(s_source_en,(s_source_en.shape[1],s_source_en.shape[2])),\
+                                                          s_source_en_mask, reward_en_fr)
                     f_dual_update_en_fr(lrate_fw,lrate_bw)
                 else:
                     cost_en_fr = f_dual_grad_shared_en_fr(s_source_en, s_source_en_mask, s_mid_fr, s_mid_fr_mask, reward_en_fr)
-                    f_dual_update_en_fr(lrate_fw,lrate_bw)
+                    f_dual_update_en_fr(lrate_fw)
                 cost_acc_en_fr += cost_en_fr
+                
+                if print_gradient and numpy.mod(training_progress_en_fr.uidx,disp_grad_Freq)==0:
+                    save_grad = g_en_fr(s_source_en, s_source_en_mask, s_mid_fr, s_mid_fr_mask, reward_en_fr)
+                    print [save_grad[i].max() for i in range(len(save_grad))]
+                    save_grad = g_ce_fr_en(numpy.reshape(s_mid_fr,(1,s_mid_fr.shape[0],s_mid_fr.shape[1])), \
+                                                              s_mid_fr_mask, \
+                                                              numpy.reshape(s_source_en,(s_source_en.shape[1],s_source_en.shape[2])),\
+                                                              s_source_en_mask)
+                    print [save_grad[i].max() for i in range(len(save_grad))]
                 #print "time to dual update :", time.time()-u1
-                    
+                
                 if numpy.isnan(cost_en_fr):
                     ipdb.set_trace()
                     
@@ -552,8 +597,8 @@ def train(dim_word=512,  # word vector dimensionality
                     sample, score, sample_word_probs, alignment, hyp_graph = nmt.gen_sample([f_init_fr_en],\
                                            [f_next_fr_en],
                                            x_current,
-                                           k=2,
-                                           maxlen=30,
+                                           k=beam_search_size,
+                                           maxlen=maxlen,
                                            stochastic=stochastic,
                                            argmax=False,
                                            suppress_unk=False,
@@ -570,24 +615,33 @@ def train(dim_word=512,  # word vector dimensionality
                 #print "time sampling one batch:", time.time() - u1
                 u1 = time.time()                                                                
                 #Time for dual ascent update: average over batch then over samples
-                reward_fr_en = f_log_probs_en(s_mid_en_2, s_mid_en_2_mask) * alpha\
+                reward_fr_en = (f_log_probs_en(s_mid_en_2, s_mid_en_2_mask) * alpha\
                                                 + f_log_probs_en_fr(numpy.reshape(s_mid_en,(1,s_mid_en.shape[0],s_mid_en.shape[1])), \
                                                  s_mid_en_mask, \
                                                  numpy.reshape(s_source_fr,(s_source_fr.shape[1],s_source_fr.shape[2])),\
-                                                 s_source_fr_mask) * (1-alpha)
+                                                 s_source_fr_mask) * (1-alpha)) * reward_scale
                 #print "time to calculate reward: ", time.time() - u1                                                                        
                 u1 = time.time()
                 if use_second_update:
                     cost_fr_en = f_dual_grad_shared_fr_en(s_source_fr, s_source_fr_mask, s_mid_en, s_mid_en_mask,\
                                                           numpy.reshape(s_mid_en,(1,s_mid_en.shape[0],s_mid_en.shape[1])), \
-                                                 s_mid_en_mask, \
-                                                 numpy.reshape(s_source_fr,(s_source_fr.shape[1],s_source_fr.shape[2])),\
-                                                 s_source_fr_mask, reward_fr_en)
+                                                          s_mid_en_mask, \
+                                                          numpy.reshape(s_source_fr,(s_source_fr.shape[1],s_source_fr.shape[2])),\
+                                                          s_source_fr_mask, reward_fr_en)
                     f_dual_update_fr_en(lrate_fw,lrate_bw)
                 else:
                     cost_fr_en = f_dual_grad_shared_fr_en(s_source_fr, s_source_fr_mask, s_mid_en, s_mid_en_mask, reward_fr_en)
-                    f_dual_update_fr_en(lrate_fw,lrate_bw)
+                    f_dual_update_fr_en(lrate_fw)
                 cost_acc_fr_en += cost_fr_en
+                
+                if print_gradient and numpy.mod(training_progress_en_fr.uidx,disp_grad_Freq)==0:
+                    save_grad = g_fr_en(s_source_fr, s_source_fr_mask, s_mid_en, s_mid_en_mask, reward_fr_en)
+                    print [save_grad[i].max() for i in range(len(save_grad))]
+                    save_grad = g_ce_en_fr(numpy.reshape(s_mid_en,(1,s_mid_en.shape[0],s_mid_en.shape[1])), \
+                                                              s_mid_en_mask, \
+                                                              numpy.reshape(s_source_fr,(s_source_fr.shape[1],s_source_fr.shape[2])),\
+                                                              s_source_fr_mask)
+                    print [save_grad[i].max() for i in range(len(save_grad))]
                 #print "time to dual update :", time.time()-u1                    
                 if numpy.isnan(cost_fr_en):
                     ipdb.set_trace()
@@ -601,39 +655,58 @@ def train(dim_word=512,  # word vector dimensionality
                 cost_ce_acc_en_fr += cost_ce_en_fr
                 # do the update on parameters
                 f_update_en_fr(lrate_bi)
-            
+                
+                if print_gradient and numpy.mod(training_progress_en_fr.uidx,disp_grad_Freq)==0:
+                    save_grad = g_ce_en_fr(x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr)
+                    print [save_grad[i].max() for i in range(len(save_grad))]
+                #print g_ce_en_fr(x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr)
             if x_fr_fr_en is not None:
                 c_d_batches_fr_en += 1
                 cost_ce_fr_en = f_grad_shared_fr_en(x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en)
                 cost_ce_acc_fr_en += cost_ce_fr_en
                 # do the update on parameters
                 f_update_fr_en(lrate_bi)
+                
+                if print_gradient and numpy.mod(training_progress_en_fr.uidx,disp_grad_Freq)==0:
+                    save_grad = g_ce_fr_en(x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en)
+                    print [save_grad[i].max() for i in range(len(save_grad))]
+                #print g_ce_fr_en(x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en)
             #print "time to standard update :", time.time()-u1
                                                         
         #print
-            if numpy.mod(training_progress_en_fr.uidx,dispFreq) ==0:
+            if numpy.mod(training_progress_en_fr.uidx, dispFreq) == 0:
                 ud = time.time()-ud_start
                 ud_start = time.time()
                 cost_avg_en_fr = cost_acc_en_fr / float(c_fb_batches_en_fr)
                 cost_avg_fr_en = cost_acc_fr_en / float(c_fb_batches_fr_en)
-                cost_ce_avg_en_fr = cost_ce_acc_en_fr / float(c_d_batches_fr_en)
-                cost_ce_avg_fr_en = cost_ce_acc_fr_en / float(c_d_batches_en_fr)
+                cost_ce_avg_en_fr = cost_ce_acc_en_fr / float(c_d_batches_en_fr)
+                cost_ce_avg_fr_en = cost_ce_acc_fr_en / float(c_d_batches_fr_en)
                 print 'epoch:', training_progress_en_fr.eidx , 'Update: ', training_progress_en_fr.uidx,\
                 "cost_en_fr: %f cost_fr_en: %f" % (cost_avg_en_fr, cost_avg_fr_en),\
                 "cost_ce_en_fr: %f cost_ce_fr_en: %f" % (cost_ce_avg_en_fr, cost_ce_avg_fr_en),\
                 'UD: ', ud
-                if save:
-                    saveto_uidx = '{}.iter{}.en_fr.npz'.format(
-                            os.path.splitext(saveto)[0], training_progress_en_fr.uidx)
-    
-                    both_params = dict(theano_util.unzip_from_theano(tparams_en_fr))
-                    numpy.savez(saveto_uidx, **both_params)
-                    
-                    saveto_uidx = '{}.iter{}.fr_en.npz'.format(
-                            os.path.splitext(saveto)[0], training_progress_fr_en.uidx)
-    
-                    both_params = dict(theano_util.unzip_from_theano(tparams_fr_en))
-                    numpy.savez(saveto_uidx, **both_params)                 
+                c_fb_batches_en_fr = 0
+                c_d_batches_en_fr = 0
+                c_fb_batches_fr_en = 0
+                c_d_batches_fr_en = 0
+                cost_acc_en_fr = 0
+                cost_ce_acc_en_fr = 0
+                cost_acc_fr_en = 0
+                cost_ce_acc_fr_en = 0
+                
+            if save and numpy.mod(training_progress_en_fr.uidx, saveFreq) == 0:
+                saveto_uidx = '{}.iter{}.en_fr.npz'.format(
+                        os.path.splitext(saveto)[0], training_progress_en_fr.uidx)
+
+                both_params = dict(theano_util.unzip_from_theano(tparams_en_fr))
+                numpy.savez(saveto_uidx, **both_params)
+                
+                saveto_uidx = '{}.iter{}.fr_en.npz'.format(
+                        os.path.splitext(saveto)[0], training_progress_fr_en.uidx)
+
+                both_params = dict(theano_util.unzip_from_theano(tparams_fr_en))
+                numpy.savez(saveto_uidx, **both_params)    
+                
         # test on validation data:
             if numpy.mod(training_progress_en_fr.uidx, validFreq) == 0:
                 use_noise_en_fr.set_value(0.)
@@ -685,37 +758,37 @@ def train(dim_word=512,  # word vector dimensionality
             try:      
                 x_en = train_en.next()
                 x_en_s, x_mask_en = lm.prepare_data(x_en, maxlen=maxlen,
-                                                            n_words=n_words)
+                                                            n_words=n_words_en)
             except StopIteration:
                 break
             
             try: 
                 x_fr = train_fr.next()
                 x_fr_s, x_mask_fr = lm.prepare_data(x_fr, maxlen=maxlen,
-                                                            n_words=n_words)
+                                                            n_words=n_words_fr)
             except StopIteration:
                 break
             
             try:
                 x_en_en_fr, x_fr_en_fr = train_en_fr.next()
-                x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = nmt.prepare_data(x_en_en_fr, x_fr_en_fr,maxlen=maxlen,
-                                                            n_words=n_words)
+                x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = nmt.prepare_data(x_en_en_fr, x_fr_en_fr, maxlen=maxlen,
+                                                            n_words=n_words_en)
             except StopIteration:
                 train_en_fr.reset()
                 x_en_en_fr, x_fr_en_fr = train_en_fr.next()
-                x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = nmt.prepare_data(x_en_en_fr, x_fr_en_fr,maxlen=maxlen,
-                                                            n_words=n_words)
+                x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr = nmt.prepare_data(x_en_en_fr, x_fr_en_fr, maxlen=maxlen,
+                                                            n_words=n_words_en)
                 
             try:
                 x_fr_fr_en, x_en_fr_en = train_fr_en.next()
-                x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = nmt.prepare_data(x_fr_fr_en, x_en_fr_en,maxlen=maxlen,
-                                                            n_words=n_words)
+                x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = nmt.prepare_data(x_fr_fr_en, x_en_fr_en, maxlen=maxlen,
+                                                            n_words=n_words_fr)
             except StopIteration:
                 train_fr_en.reset()
                 x_fr_fr_en, x_en_fr_en = train_fr_en.next()
-                x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = nmt.prepare_data(x_fr_fr_en, x_en_fr_en,maxlen=maxlen,
-                                                            n_words=n_words)
-            
+                x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en = nmt.prepare_data(x_fr_fr_en, x_en_fr_en, maxlen=maxlen,
+                                                            n_words=n_words_fr)
+   
+    print "saveto:",saveto
     return 0
 
-train()
