@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 import LM
 from LM import lm
-import theano.sandbox.gpuarray
 from nematus import nmt,theano_util,data_iterator,util,optimizers, training_progress
 import theano
 import theano.tensor as T
