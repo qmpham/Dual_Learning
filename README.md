@@ -7,4 +7,4 @@ To train model, you need to: <br />
 +) pretrain 2 translation models using old version of nematus provided in my Github (for warmstart) and put them in models/name_of_your_warmstart_directory/NMT. <br />
 +) train bilingual word embeddings for 2 languages ( I suggest using MUSE library of FAIR) and put them in data/word_emb/name_of_embedding_directory. <br />
 (You should remember that Dual Learning is only used to improve performance of pretrained models by using monolingual corpora.)<br />
-
++) To run your experiment, use script/train_dual_Q_value_shared.sh
