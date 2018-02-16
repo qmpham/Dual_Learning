@@ -1,7 +1,16 @@
 import cPickle as pkl
 import gzip
+import json
+def unicode_to_utf8(d):
+    return dict((key.encode("UTF-8"), value) for (key,value) in d.items())
 
-
+def load_dict(filename):
+    try:
+        with open(filename, 'rb') as f:
+            return unicode_to_utf8(json.load(f))
+    except:
+        with open(filename, 'rb') as f:
+            return pkl.load(f)
 class TextIterator:
     def __init__(self, source,
                  source_dict,
@@ -12,8 +21,7 @@ class TextIterator:
             self.source = gzip.open(source, 'r')
         else:
             self.source = open(source, 'r')
-        with open(source_dict, 'rb') as f:
-            self.source_dict = pkl.load(f)
+        self.source_dict = load_dict(source_dict)
 
         self.batch_size = batch_size
         self.maxlen = maxlen
