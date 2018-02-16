@@ -5,5 +5,6 @@ I suggest you using my new version implementation of Dual Learning which uses Q-
 To train model, you need to: <br />
 +) pretrain 2 language models (using code of dl4mt) and put them in models/LM  <br />
 +) pretrain 2 translation models using old version of nematus provided in my Github (for warmstart) and put them in models/name_of_your_warmstart_directory/NMT. <br />
++) train word embeddings for 2 languages and put them in data/word_emb/name_of_embedding_directory. <br />
 (You should remember that Dual Learning is only used to improve performance of pretrained models by using monolingual corpora.)<br />
 
