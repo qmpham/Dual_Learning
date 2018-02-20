@@ -190,6 +190,7 @@ def train(dim_word = 512,  # word vector dimensionality
               validFreq = 2000,
               batch_size= 30,
               valid_batch_size = 30,
+              chunksize = 200,
               save = True,
               warm_start_ = True,
               saveto = home_dir + 'Dual_NMT/models/dual2/model_dual.npz',
@@ -846,7 +847,7 @@ def train(dim_word = 512,  # word vector dimensionality
                     forward_en_fr_prefix = []
                     backward_en_fr_prefix = []
                     sim_CBOW_en_fr_prefix = []
-                    chunksize = 50
+                   
                     for i in xrange(0,s_mid_fr_sampling.shape[1],chunksize): 
                         forward_en_fr_samplings.append(f_log_probs_fr(s_mid_fr_sampling[:,i:i+chunksize], s_mid_fr_sampling_mask[:,i:i+chunksize])/s_mid_fr_sampling_mask[:,i:i+chunksize].sum(0))
                         backward_en_fr_sammplings.append(f_log_probs_fr_en(numpy.reshape(s_mid_fr_sampling[:,i:i+chunksize],(1,s_mid_fr_sampling[:,i:i+chunksize].shape[0],\
@@ -1084,7 +1085,6 @@ def train(dim_word = 512,  # word vector dimensionality
                     forward_fr_en_prefix = []
                     backward_fr_en_prefix = []
                     sim_CBOW_fr_en_prefix = []
-                    chunksize = 50
 
                     for i in xrange(0, s_mid_en_sampling.shape[1],chunksize):
                         forward_fr_en_samplings.append(f_log_probs_en(s_mid_en_sampling[:,i:i+chunksize], s_mid_en_sampling_mask[:,i:i+chunksize])/s_mid_en_sampling_mask[:,i:i+chunksize].sum(0))
@@ -1148,7 +1148,7 @@ def train(dim_word = 512,  # word vector dimensionality
                         save_count_fr_en = save_count_fr_en + 1                              
                 #Time for dual ascent update: average over batch then over samples
                     try:
-                        reward_fr_en = forward_fr_en * alpha_en_fr + backward_fr_en * (1-alpha_en_fr) + sim_CBOW_fr_en * beta
+                        reward_fr_en = forward_fr_en * alpha_fr_en + backward_fr_en * (1-alpha_fr_en) + sim_CBOW_fr_en * beta
                     except ValueError:
                         ipdb.set_trace()
                     #print "time to calculate reward: ", time.time() - u1                                                                        
@@ -1182,7 +1182,7 @@ def train(dim_word = 512,  # word vector dimensionality
             if x_en_en_fr is not None:
                 c_d_batches_en_fr += 1
                 cost_ce_en_fr = f_grad_shared_en_fr(x_en_en_fr, x_mask_en_en_fr, x_fr_en_fr, x_mask_fr_en_fr)
-                cost_ce_acc_en_fr += cost_ce_en_fr
+                cost_ce_acc_en_fr.append(cost_ce_en_fr)
                 # do the update on parameters
                 f_update_en_fr(lrate_bi * coeff_bi)
             
@@ -1196,7 +1196,7 @@ def train(dim_word = 512,  # word vector dimensionality
             if x_fr_fr_en is not None:
                 c_d_batches_fr_en += 1
                 cost_ce_fr_en = f_grad_shared_fr_en(x_fr_fr_en, x_mask_fr_fr_en, x_en_fr_en, x_mask_en_fr_en)
-                cost_ce_acc_fr_en += cost_ce_fr_en
+                cost_ce_acc_fr_en.append(cost_ce_fr_en)
                 # do the update on parameters
                 f_update_fr_en(lrate_bi * coeff_bi)
             #print "time for a batch:", time.time()-u0
@@ -1265,19 +1265,19 @@ def train(dim_word = 512,  # word vector dimensionality
     		c_fb_batches_fr_en = 0
     		c_d_batches_fr_en = 0
 
-    		cost_acc_en_fr = 0
-    		cost_ce_acc_en_fr = 0
-    		cost_acc_fr_en = 0
-    		cost_ce_acc_fr_en = 0
+    		cost_acc_en_fr = []
+    		cost_ce_acc_en_fr = []
+    		cost_acc_fr_en = []
+    		cost_ce_acc_fr_en = []
 
-    		#dist_acc_en_fr = 0
-    		forward_acc_en_fr = 0
-    		backward_acc_en_fr = 0
+    		sim_acc_en_fr = []
+    		forward_acc_en_fr = []
+    		backward_acc_en_fr = []
     		#length_diff_acc_en_fr = 0
 
-    		#dist_acc_fr_en = 0
-    		forward_acc_fr_en = 0
-    		backward_acc_fr_en = 0
+    		sim_acc_fr_en = []
+    		forward_acc_fr_en = []
+    		backward_acc_fr_en = []
     		#length_diff_acc_fr_en = 0
 
             if save and numpy.mod(training_progress_en_fr.uidx, saveFreq) == 0:
