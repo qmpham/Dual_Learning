@@ -3,8 +3,8 @@ This is a project that I did in my last internship. The paper can be found at ht
 Todo: <br />
 I suggest you using my new version implementation of Dual Learning which uses Q-value to estimate Policy Gradient. <br />
 To train model, you need to: <br />
-+) pretrain 2 language models (using code of dl4mt) and put them in models/LM  <br />
-+) pretrain 2 translation models using old version of nematus provided in my Github (for warmstart) and put them in models/name_of_your_warmstart_directory/NMT. <br />
++) pretrain 2 language models (using code of dl4mt) and put them in models/LM/name_of_your_LM <br />
++) pretrain 2 translation models using old version of nematus provided in my Github (for warmstart) and put them in models/NMT/name_of_your_warmstart_MT. <br />
 +) train bilingual word embeddings for 2 languages ( I suggest using MUSE library of FAIR) and put them in data/word_emb/name_of_embedding_directory. <br />
 (You should remember that Dual Learning is only used to improve performance of pretrained models by using monolingual corpora.)<br />
 +) To run your experiment, use script/train_dual_Q_value_shared.sh
